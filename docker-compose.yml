@@ -1,0 +1,72 @@
+version: "3.9"
+
+services:
+  pii-redact:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: pii-redact:latest
+    restart: unless-stopped
+
+    # Inline/batch mode: pass CLI args via environment or command override.
+    # Example: docker compose run pii-redact process --input /inbox/claim.pdf
+    command: ["--help"]
+
+    environment:
+      # Enforce offline operation inside the container
+      - TRANSFORMERS_OFFLINE=1
+      - HF_DATASETS_OFFLINE=1
+      - HF_HUB_OFFLINE=1
+      # Override vault and audit paths to mounted volumes
+      - PII_VAULT_PATH=/app/vault/vault.db
+      - PII_AUDIT_PATH=/app/audit_logs
+
+    volumes:
+      # inbox: drop documents here for processing
+      - ./inbox:/app/inbox
+      # redacted: output redacted documents land here
+      - ./redacted:/app/redacted
+      # vault: encrypted PII storage (SQLite, key-per-run)
+      - ./vault:/app/vault
+      # audit_logs: append-only JSON audit trail
+      - ./audit_logs:/app/audit_logs
+
+    # No network access at runtime — this is intentional.
+    # All model weights are baked into the image.
+    network_mode: none
+
+  # Optional Gradio UI — comment out if not needed
+  pii-redact-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: pii-redact:latest
+    restart: unless-stopped
+    command: ["--ui"]
+
+    environment:
+      - TRANSFORMERS_OFFLINE=1
+      - HF_DATASETS_OFFLINE=1
+      - HF_HUB_OFFLINE=1
+      - PII_VAULT_PATH=/app/vault/vault.db
+      - PII_AUDIT_PATH=/app/audit_logs
+
+    ports:
+      - "7860:7860"
+
+    volumes:
+      - ./inbox:/app/inbox
+      - ./redacted:/app/redacted
+      - ./vault:/app/vault
+      - ./audit_logs:/app/audit_logs
+
+    # UI needs localhost access only — no external network
+    networks:
+      - ui_only
+
+networks:
+  ui_only:
+    driver: bridge
+    internal: false  # allow localhost → container; no external internet

@@ -1,0 +1,63 @@
+# Version control
+.git/
+.gitignore
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+*.coverage
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Model weights (downloaded during Docker build, not needed as build context)
+models/paddleocr/
+models/trocr/
+models/yolov8/*.pt
+models/sam/*.pth
+models/spacy/
+models/insurance_ner/
+
+# Runtime data directories (mounted as volumes)
+inbox/
+redacted/
+vault/*.db
+audit_logs/*.json
+
+# Training data (not part of the runtime image)
+data/train.spacy
+data/dev.spacy
+
+# Secrets / env files
+.env
+*.env.local
+secrets/
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+
+# Documentation build
+docs/_build/
+site/
