@@ -53,9 +53,10 @@ def _run_regex_ner(text: str) -> list[tuple[str, str]]:
     PATTERNS: list[tuple[str, str]] = [
         ("SSN", r"\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b"),
         ("SSN", r"\b(?!000|666|9\d{2})\d{3}(?!00)\d{2}(?!0000)\d{4}\b"),
-        ("PHONE", r"\b(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"),
+        ("PHONE_NUMBER", r"\b(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"),
         ("EMAIL", r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"),
         ("DATE", r"\b(?:\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}[-/]\d{1,2}[-/]\d{1,2})\b"),
+        ("DATE_OF_BIRTH", r"\b(?:DOB|D\.O\.B|born)\s*:?\s*\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b"),
         ("ZIP", r"\b\d{5}(?:-\d{4})?\b"),
         ("POLICY_NUM", r"\bPOL-[A-Z0-9]{7,}\b"),
         ("CLAIM_REF", r"\b(?:CLM|CLA|CLAIM)-[A-Z0-9]{6,15}\b"),
@@ -63,6 +64,8 @@ def _run_regex_ner(text: str) -> list[tuple[str, str]]:
         ("EIN", r"\b(?!00)\d{2}-\d{7}\b"),
         ("ICD10_CODE", r"\b[A-TV-Z][0-9][0-9AB](?:\.[0-9A-TV-Z]{1,4})?\b"),
         ("DEA_NUM", r"\b[A-Z]{2}\d{7}\b"),
+        ("BANK_ROUTING_NUMBER", r"\b(?:0[0-9]|1[0-2]|2[1-9]|3[0-2]|6[1-2]|7[1-2])\d{7}\b"),
+        ("IPV4", r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
     ]
 
     findings: list[tuple[str, str]] = []
