@@ -2,6 +2,9 @@
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [project]
 name = "pii-redact"
 version = "0.1.0"
@@ -24,7 +27,7 @@ dependencies = [
     "torchvision>=0.16",
     # Visual detection
     "ultralytics>=8.1",
-    "segment-anything @ git+https://github.com/facebookresearch/segment-anything.git",
+    "segment-anything",
     # Barcodes / QR
     "pyzbar>=0.1.9",
     "zxing-cpp>=2.2",

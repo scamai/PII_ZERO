@@ -113,7 +113,7 @@ _policy_recognizer = PatternRecognizer(
     patterns=[
         Pattern(
             name="policy_pol_prefix",
-            regex=r"\bPOL-[A-Z0-9]{7}\b",
+            regex=r"\bPOL-[A-Z0-9]{7,}\b",
             score=0.90,
         ),
         Pattern(
@@ -156,7 +156,7 @@ _adjuster_id_recognizer = PatternRecognizer(
     patterns=[
         Pattern(
             name="adjuster_adj_prefix",
-            regex=r"\bADJ[A-Z0-9]{4,10}\b",
+            regex=r"\bADJ-?[A-Z0-9]{4,10}\b",
             score=0.85,
         ),
         Pattern(
@@ -180,7 +180,7 @@ _claim_ref_recognizer = PatternRecognizer(
     patterns=[
         Pattern(
             name="claim_clm_prefix",
-            regex=r"\bCL[AM]-[A-Z0-9]{6,12}\b",
+            regex=r"\b(?:CLM|CLA|CLAIM)-[A-Z0-9]{6,15}\b",
             score=0.90,
         ),
         Pattern(

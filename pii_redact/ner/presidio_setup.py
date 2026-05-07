@@ -32,13 +32,28 @@ def build_analyzer_engine() -> "AnalyzerEngine":
 
     from pii_redact.ner.regex_patterns import PRESIDIO_RECOGNIZER_LIST
 
-    spacy_model_path = str(
-        Path(settings.models.spacy_model).resolve()
-    )
+    # Resolve model name: prefer the configured local path if it exists on disk,
+    # then fall back through progressively smaller installed spaCy models.
+    import spacy as _spacy
 
-    # Build the NLP engine pointing at a local spaCy model.
-    # NlpEngineProvider accepts a "models" list; each entry maps a language to a
-    # model name. Because we are offline, the model *name* is the local path.
+    configured_path = Path(settings.models.spacy_model).resolve()
+    _candidates = [
+        str(configured_path),
+        "en_core_web_lg",
+        "en_core_web_md",
+        "en_core_web_sm",
+    ]
+    spacy_model_path = "blank:en"
+    for candidate in _candidates:
+        try:
+            _spacy.load(candidate)
+            spacy_model_path = candidate
+            break
+        except Exception:
+            continue
+
+    logger.info("Using spaCy model: %s", spacy_model_path)
+
     nlp_configuration = {
         "nlp_engine_name": "spacy",
         "models": [{"lang_code": "en", "model_name": spacy_model_path}],
