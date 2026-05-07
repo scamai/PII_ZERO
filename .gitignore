@@ -17,3 +17,5 @@ audit_logs/*.json
 vault/*.db
 data/train.spacy
 data/dev.spacy
+data/benchmarks/
+*.arrow

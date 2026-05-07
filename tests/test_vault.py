@@ -46,6 +46,7 @@ def _require_cryptography():
 # the vault module isn't written yet, the crypto contract is validated.
 
 
+@pytest.mark.subprocess
 class TestCryptoRoundTrip:
     """Encrypt/decrypt round-trip using Fernet (the expected vault cipher)."""
 
