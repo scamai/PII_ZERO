@@ -8,6 +8,9 @@ from __future__ import annotations
 import importlib
 import json
 import os
+
+import pytest
+pytestmark = pytest.mark.fast
 import sqlite3
 import sys
 import tempfile
@@ -145,6 +148,7 @@ class TestCryptoRoundTrip:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.subprocess
 class TestVaultEncryptDecrypt:
     def test_vault_encrypt_decrypt_roundtrip(self):
         vault = _import_vault()

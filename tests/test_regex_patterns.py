@@ -14,6 +14,10 @@ from typing import NamedTuple
 
 import pytest
 
+# Importing pii_redact.ner.regex_patterns triggers presidio_analyzer → spacy → torch.
+# Run this only in CI / explicitly: pytest -m slow
+pytestmark = pytest.mark.slow
+
 
 # ---------------------------------------------------------------------------
 # Helpers

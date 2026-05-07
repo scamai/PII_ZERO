@@ -79,6 +79,13 @@ deprecated for multi-threaded Python 3.13.
 7. [ ] Wire Gradio UI to actual pipeline
 8. [ ] Docker image + CI
 
+## Test Tier Rules (CRITICAL — prevents machine OOM/kill)
+- **`pytest -m fast`** — pure Python only, no ML imports. Safe to run anytime. (<10s)
+- **`pytest -m slow`** — loads torch+spacy+paddle+presidio. CI/Docker only. Never background.
+- **Never run `pytest tests/` (unmarked full suite)** — loads all ML libraries simultaneously.
+- test_regex_patterns.py is `slow` (presidio import → spacy → torch chain)
+- test_models, test_vault, test_no_blur_safety, test_redact_engine are `fast`
+
 ## Attempted / Known Issues
 - **scispaCy install**: version conflicts with spaCy 3.x; skipped in favor of spaCy `en_core_web_sm`
 - **PaddleOCR**: heavy install, not yet exercised in tests (guarded by `importlib` in engine tests)

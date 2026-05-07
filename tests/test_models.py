@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.fast
+
 from pii_redact.models import (
     DocumentResult,
     DocumentType,

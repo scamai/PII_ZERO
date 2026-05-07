@@ -22,6 +22,8 @@ import pytest
 
 from pii_redact.models import RedactionBox
 
+pytestmark = pytest.mark.fast
+
 
 # ---------------------------------------------------------------------------
 # Constants
