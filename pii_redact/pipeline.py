@@ -312,7 +312,7 @@ def _write_audit_log(result: DocumentResult, log_dir: Path, settings) -> None:
 class PIIRedactionPipeline:
     """Orchestrates the full PII detection and redaction workflow."""
 
-    def __init__(self, settings, vault=None):
+    def __init__(self, settings, vault=None, use_vlm: bool = False):
         """
         Parameters
         ----------
@@ -320,9 +320,25 @@ class PIIRedactionPipeline:
             A pii_redact.config.Settings instance.
         vault:
             Optional PIIVault for storing/restoring original PII values.
+        use_vlm:
+            Enable Qwen3-VL visual extractor. Lazy-loads the model on first
+            use; GPU-first with CPU fallback. Default off (requires download).
         """
         self._settings = settings
         self._vault = vault
+        self._use_vlm = use_vlm
+        self._vlm = None  # loaded lazily
+
+    def _get_vlm(self):
+        """Return the VLMExtractor singleton, loading it on first call."""
+        if self._vlm is None:
+            from pii_redact.ner.vlm_extractor import VLMExtractor
+
+            model_id = self._settings.models.get("vlm_model_id")
+            prefer_gpu = self._settings.models.get("vlm_prefer_gpu", True)
+            self._vlm = VLMExtractor(model_id=model_id, prefer_gpu=prefer_gpu)
+            logger.info("VLMExtractor created: %s (gpu=%s)", model_id, prefer_gpu)
+        return self._vlm
 
     # ------------------------------------------------------------------
     # Public API
@@ -760,19 +776,36 @@ class PIIRedactionPipeline:
     # Layer helpers
     # ------------------------------------------------------------------
 
-    def _run_visual_layer(self, image, doc_type: DocumentType, page_idx: int) -> list[RedactionBox]:
-        """Run the VisualLayer and tag boxes with their page index."""
+    def _run_visual_layer(
+        self,
+        image,
+        doc_type: DocumentType,
+        page_idx: int,
+        image_path: Path | None = None,
+    ) -> list[RedactionBox]:
+        """Run VisualLayer + optional VLM extractor on an image array."""
+        boxes: list[RedactionBox] = []
+
         try:
             from pii_redact.layers.visual_layer import VisualLayer
 
             vl = VisualLayer()
-            boxes = vl.process(image, doc_type)
-            for box in boxes:
+            vl_boxes = vl.process(image, doc_type)
+            for box in vl_boxes:
                 box.page = page_idx
-            return boxes
+            boxes.extend(vl_boxes)
         except Exception as exc:
             logger.warning("VisualLayer failed on page %d: %s", page_idx, exc)
-            return []
+
+        if self._use_vlm and image_path is not None:
+            try:
+                vlm_boxes = self._get_vlm().extract(image_path, page=page_idx)
+                boxes.extend(vlm_boxes)
+                logger.debug("VLM found %d entity candidate(s) on page %d", len(vlm_boxes), page_idx)
+            except Exception as exc:
+                logger.warning("VLM extraction failed on page %d: %s", page_idx, exc)
+
+        return boxes
 
     def _run_scispacy(self, image, page_idx: int = 0) -> list[RedactionBox]:
         """Run scispaCy NER over OCR text from *image*."""

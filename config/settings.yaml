@@ -8,6 +8,9 @@ models:
   spacy_model: ./models/spacy/en_core_web_lg
   insurance_ner_model: ./models/insurance_ner
   scispacy_model: ./models/spacy/en_core_sci_lg
+  # Qwen3-VL visual extractor — FP8 fits on 1x RTX 3090 (~12 GB VRAM)
+  vlm_model_id: Qwen/Qwen3-VL-8B-Instruct-FP8
+  vlm_prefer_gpu: true          # false = force CPU (uses RAM, slower)
 
 redaction:
   fill_color: [0, 0, 0]        # solid black — NEVER blur (Bishop Fox Unredacter)
