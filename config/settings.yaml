@@ -1,0 +1,38 @@
+models:
+  paddleocr_dir: ./models/paddleocr
+  trocr_name: microsoft/trocr-base-handwritten
+  trocr_dir: ./models/trocr
+  yolov8_weights: ./models/yolov8/yolov8n.pt
+  sam_checkpoint: ./models/sam/sam_vit_b.pth
+  sam_model_type: vit_b
+  spacy_model: ./models/spacy/en_core_web_lg
+  insurance_ner_model: ./models/insurance_ner
+  scispacy_model: ./models/spacy/en_core_sci_lg
+
+redaction:
+  fill_color: [0, 0, 0]        # solid black — NEVER blur (Bishop Fox Unredacter)
+  fill_padding_px: 4           # expand each box by N pixels
+  min_confidence: 0.60         # ignore detections below this threshold
+  handwriting_min_area: 500    # px² minimum ink-blob area to solid-fill
+
+vault:
+  db_path: ./vault/vault.db
+  key_env: PII_VAULT_KEY       # AES-256-GCM key from environment variable
+
+audit:
+  log_dir: ./audit_logs
+  include_entity_type: true
+  include_confidence: true
+  include_source: true
+  include_text: false          # NEVER log PII values in audit log (dev only)
+
+pipeline:
+  ocr_dpi: 300                 # PDF render DPI — minimum for reliable OCR
+  max_page_workers: 4          # parallel threads for multi-page PDFs
+  skip_visual_for_structured_pdfs: false
+
+templates:
+  cms_1500: true
+  acord_125: true
+  acord_140: true
+  perceptual_hash_threshold: 10  # hamming distance for form-type match
