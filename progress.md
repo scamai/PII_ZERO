@@ -69,16 +69,32 @@ deprecated for multi-threaded Python 3.13.
 - [x] Config system (Pydantic settings + settings.yaml)
 - [x] 84+ passing tests (85 pass, 5 skip in isolated run)
 
+## Benchmark Baseline (regex-only, no ML)
+Run: `python scripts/run_benchmark.py --dataset all --max-docs 200`
+
+| Dataset | P | R | F1 | Notes |
+|---------|---|---|----|-------|
+| TAB (555 docs) | 0.000 | 0.000 | 0.000 | TAB targets PERSON/ORG/LOC — gap for NLP/VLM |
+| Gretel Finance (200 docs) | 0.302 | 0.126 | 0.178 | EMAIL=0.867, DATE=0.412 |
+
+**Key gaps identified:**
+- PHONE: 0.0 — Gretel uses PHONE_NUMBER label, our regex hits PHONE
+- SSN: 0.0 — need to check Gretel SSN format vs our pattern
+- PERSON/ORG/LOC: 0.0 — requires NLP (Presidio NER), not just regex
+- TAB gap: needs full NLP pipeline (names, orgs, demographic entities)
+
 ## What's Next (priority order)
 1. [x] Fix full-suite segfault — excluded test_regex_patterns.py from default collection
 2. [x] Fix infinite subprocess recursion in conftest.py (_PYTEST_SUBPROCESS_WORKER sentinel)
 3. [x] Implement `pii_redact.vault` — Fernet key gen + encrypt/decrypt + VaultSession token map
 4. [x] Implement `pii_redact.audit` — SQLite write_event / read_events
-5. [ ] Implement `pii_redact.pipeline` — wire redact.engine + NER + vault into one call
-6. [ ] Validate against benchmark datasets (TAB / gretel_finance already downloaded)
-7. [ ] Integrate QWEN VLM for visual form understanding (GPU → CPU fallback)
-8. [ ] Wire Gradio UI to actual pipeline
-9. [ ] Hourly verification agent
+5. [x] Integrate Qwen3-VL-8B-Instruct-FP8 (GPU-first, CPU fallback) into pipeline
+6. [x] Benchmark runner (scripts/run_benchmark.py) — TAB + Gretel Finance
+7. [ ] Fix label mapping (PHONE_NUMBER → PHONE, etc.) to improve Gretel F1
+8. [ ] Enable Presidio NLP layer in benchmark to close PERSON/ORG/LOC gap
+9. [ ] Download Qwen3-VL model weights and validate visual extraction on sample docs
+10. [ ] Wire Gradio UI to actual pipeline
+11. [ ] Hourly verification agent
 
 ## Test Tier Rules (CRITICAL — prevents machine OOM/kill)
 - **`pytest -m fast`** — pure Python only, no ML imports. Safe to run anytime. (<10s)
