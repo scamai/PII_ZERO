@@ -51,6 +51,15 @@ LABEL_MAP: dict[str, str] = {
     "IPV6": "IP_ADDRESS",
     "EIN": "NRP",      # closest Presidio type; custom recognizer covers EIN
     "NPI": "NRP",
+    # Gretel labels missing from original map
+    "TIME": "DATE_TIME",
+    "IBAN": "IBAN_CODE",
+    "PASSPORT_NUMBER": "US_PASSPORT",
+    "DRIVER_LICENSE_NUMBER": "US_DRIVER_LICENSE",
+    "CUSTOMER_ID": "NRP",
+    "EMPLOYEE_ID": "NRP",
+    "API_KEY": "NRP",
+    "USER_NAME": "NRP",
     # TAB labels
     "PERSON": "PERSON",
     "ORG": "ORG",

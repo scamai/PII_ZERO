@@ -115,11 +115,20 @@ Run: `CUDA_VISIBLE_DEVICES="" python scripts/run_benchmark_nlp.py --dataset all 
 6. [x] Benchmark runner (scripts/run_benchmark.py) — TAB + Gretel Finance
 7. [x] Fix label mapping (ORGANIZATION→ORG, etc.) to improve Gretel F1
 8. [x] Enable Presidio NLP layer in benchmark (run_benchmark_nlp.py) — Gretel F1 +41%
-9. [x] Download Qwen3-VL model weights (complete: /home/benren/.cache/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct-FP8)
-10. [ ] Test VLM on a sample insurance document image
-11. [ ] Improve CREDIT_CARD and LOCATION detection (Gretel F1=0 for both)
-12. [ ] Wire Gradio UI to actual pipeline
-13. [ ] Hourly verification agent
+9. [x] Download Qwen3-VL model weights:
+   - FP8 (SM≥8.9): Qwen/Qwen3-VL-8B-Instruct-FP8
+   - bfloat16 (RTX 3090 / SM 8.6): Qwen/Qwen3-VL-8B-Instruct
+10. [x] Test VLM on sample document — working on GPU (16s inference, 10/10 PII detected)
+    - Fixed: Qwen3VLForConditionalGeneration class name
+    - Fixed: system message as messages dict, not apply_chat_template kwarg
+    - Fixed: SM-aware model selection (FP8 needs SM≥8.9; RTX 3090 uses bf16 base)
+11. [x] Add label mappings: TIME→DATE_TIME, IBAN→IBAN_CODE, PASSPORT_NUMBER, DRIVER_LICENSE_NUMBER
+    - IBAN_CODE: F1=0.957 after fix
+12. [ ] Improve CREDIT_CARD detection (Presidio requires Luhn validation — Gretel uses fake nums)
+13. [ ] Improve LOCATION by routing addresses through VLM instead of spaCy (VLM detects full address)
+14. [ ] Wire VLM into full pipeline (currently standalone extractor)
+15. [ ] Wire Gradio UI to actual pipeline
+16. [ ] Hourly verification agent
 
 ## Test Tier Rules (CRITICAL — prevents machine OOM/kill)
 - **`pytest -m fast`** — pure Python only, no ML imports. Safe to run anytime. (<10s)

@@ -142,20 +142,20 @@ class VLMExtractor:
         image = Image.open(str(image_path)).convert("RGB")
 
         messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image},
                     {"type": "text", "text": _USER_PROMPT},
                 ],
-            }
+            },
         ]
 
         text = self._processor.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
-            system_message=_SYSTEM_PROMPT,
         )
 
         inputs = self._processor(
