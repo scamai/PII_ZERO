@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 _analyzer_instance: "AnalyzerEngine | None" = None
 
 
-def build_analyzer_engine() -> "AnalyzerEngine":
+def build_analyzer_engine(use_gliner: bool = False) -> "AnalyzerEngine":
     """Return the singleton AnalyzerEngine, building it on first call.
 
     spaCy is loaded from the local path specified in settings.models.spacy_model.
@@ -99,6 +100,18 @@ def build_analyzer_engine() -> "AnalyzerEngine":
     for recognizer in PRESIDIO_RECOGNIZER_LIST:
         registry.add_recognizer(recognizer)
         logger.debug("Registered recognizer: %s", recognizer.name)
+
+    # Optionally add GLiNER zero-shot NER layer (opt-in via env var or parameter).
+    _use_gliner = use_gliner or os.environ.get("PII_USE_GLINER", "").lower() in ("1", "true", "yes")
+    if _use_gliner:
+        try:
+            from pii_redact.ner.gliner_recognizer import GLiNERRecognizer  # noqa: PLC0415
+
+            gliner = GLiNERRecognizer()
+            registry.add_recognizer(gliner)
+            logger.info("GLiNER recognizer registered")
+        except Exception as exc:
+            logger.warning("GLiNER not available, skipping: %s", exc)
 
     _analyzer_instance = AnalyzerEngine(
         nlp_engine=nlp_engine,
