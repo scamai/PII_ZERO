@@ -119,6 +119,37 @@ def _get_analyzer():
     return _analyzer
 
 
+_langdetect_available: bool | None = None
+
+
+def _is_english_context(text: str, start: int, end: int) -> bool:
+    """Return True if the ±100-char window around [start:end] is English."""
+    global _langdetect_available
+    if _langdetect_available is None:
+        try:
+            import langdetect  # noqa: F401
+            _langdetect_available = True
+        except ImportError:
+            _langdetect_available = False
+
+    if not _langdetect_available:
+        return True
+
+    from langdetect import detect, LangDetectException
+
+    window = text[max(0, start - 100): end + 100].strip()
+    if len(window) < 10:
+        return True
+    try:
+        return detect(window) == "en"
+    except LangDetectException:
+        return True
+
+
+# Entity types where foreign-language FPs are common (NLP-driven, not pattern-driven)
+_LANG_FILTER_TYPES = {"PERSON", "ORG", "LOCATION"}
+
+
 def run_nlp_ner(text: str, min_score: float = 0.6) -> list[tuple[str, str]]:
     """Run Presidio NER + custom insurance recognizers on text.
 
@@ -136,6 +167,10 @@ def run_nlp_ner(text: str, min_score: float = 0.6) -> list[tuple[str, str]]:
         if r.score < min_score:
             continue
         span = text[r.start:r.end]
+        # Drop NLP-detected spans that sit in non-English context windows
+        if r.entity_type in _LANG_FILTER_TYPES:
+            if not _is_english_context(text, r.start, r.end):
+                continue
         findings.append((r.entity_type, span))
     return findings
 
