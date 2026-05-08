@@ -62,10 +62,29 @@ def _render_pdf_pages(pdf_path: Path, dpi: int = 300) -> list:
 
 
 def _extract_pdf_text_boxes(pdf_path: Path) -> list[tuple[int, list[RedactionBox]]]:
-    """Extract text from the native PDF text layer and run NER.
+    """Extract text from a PDF and run NER, with Docling as the primary path.
+
+    Tries Docling layout-aware extraction first (provides field context for
+    ORG disambiguation).  Falls back to raw PyMuPDF span extraction if
+    Docling is unavailable or fails.
 
     Returns a list of (page_index, [RedactionBox, ...]) tuples.
     """
+    # --- Docling layout-aware path -------------------------------------------
+    try:
+        from pii_redact.layers.docling_parser import (
+            extract_text_with_layout,
+            is_high_value_field,
+            is_low_value_field,
+        )
+
+        layout_spans = extract_text_with_layout(pdf_path)
+        if layout_spans:
+            return _boxes_from_layout_spans(layout_spans)
+    except Exception as exc:
+        logger.debug("Docling path failed, falling back to PyMuPDF: %s", exc)
+
+    # --- PyMuPDF fallback path -----------------------------------------------
     try:
         import fitz
 
@@ -95,10 +114,12 @@ def _extract_pdf_text_boxes(pdf_path: Path) -> list[tuple[int, list[RedactionBox
                                 hits = []
 
                             from pii_redact.ner.entity_filters import (
-                                is_valid_org, is_valid_person,
+                                is_valid_org,
+                                is_valid_person,
                             )
+
                             for hit in hits:
-                                span_text = text[hit.start:hit.end]
+                                span_text = text[hit.start : hit.end]
                                 if hit.entity_type == "ORGANIZATION":
                                     if not is_valid_org(span_text, text):
                                         continue
@@ -125,6 +146,82 @@ def _extract_pdf_text_boxes(pdf_path: Path) -> list[tuple[int, list[RedactionBox
     except Exception as exc:
         logger.warning("PDF text extraction failed: %s", exc)
         return []
+
+
+def _boxes_from_layout_spans(
+    layout_spans,  # list[LayoutSpan]
+) -> list[tuple[int, list[RedactionBox]]]:
+    """Run NER on Docling layout spans and return (page_idx, boxes) tuples.
+
+    Confidence adjustment based on field context:
+    - is_high_value_field: floor confidence at 0.75 for PERSON/ORG detections
+    - is_low_value_field: skip PERSON/ORG detections (institutional, not PII)
+    - Otherwise: use normal NER confidence
+    """
+    from pii_redact.layers.docling_parser import is_high_value_field, is_low_value_field
+    from pii_redact.ner.entity_filters import is_valid_org, is_valid_person
+    from pii_redact.ner.presidio_setup import build_analyzer_engine as get_analyzer
+
+    analyzer = get_analyzer()
+
+    boxes_by_page: dict[int, list[RedactionBox]] = {}
+
+    for span in layout_spans:
+        text = span.text.strip()
+        if not text:
+            continue
+
+        field_label = span.field_label
+        high_value = is_high_value_field(field_label)
+        low_value = is_low_value_field(field_label)
+
+        try:
+            hits = analyzer.analyze(text=text, language="en")
+        except Exception:
+            hits = []
+
+        for hit in hits:
+            entity_type = hit.entity_type
+            span_text = text[hit.start : hit.end]
+
+            # Skip PERSON/ORG from low-value (institutional) fields
+            if low_value and entity_type in ("PERSON", "ORGANIZATION"):
+                logger.debug(
+                    "Skipping %s '%s' in low-value field '%s'",
+                    entity_type,
+                    span_text,
+                    field_label,
+                )
+                continue
+
+            # Entity-type-specific validity filters
+            if entity_type == "ORGANIZATION":
+                if not is_valid_org(span_text, text):
+                    continue
+            elif entity_type == "PERSON":
+                if not is_valid_person(span_text):
+                    continue
+
+            # Confidence floor for high-value fields
+            confidence = hit.score
+            if high_value and entity_type in ("PERSON", "ORGANIZATION"):
+                confidence = max(confidence, 0.75)
+
+            boxes_by_page.setdefault(span.page, []).append(
+                RedactionBox(
+                    x=span.x,
+                    y=span.y,
+                    w=span.w,
+                    h=span.h,
+                    entity_type=entity_type,
+                    confidence=confidence,
+                    source="presidio_docling",
+                    page=span.page,
+                    text_found=span_text,
+                )
+            )
+
+    return sorted(boxes_by_page.items())
 
 
 def _run_ocr_on_image(image, page_idx: int = 0) -> list[RedactionBox]:

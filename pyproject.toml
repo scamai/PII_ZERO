@@ -45,6 +45,8 @@ dependencies = [
     "gradio>=4.19",
     # Hashing for template matching
     "imagehash>=4.3",
+    # Layout-aware PDF parsing (field context for ORG disambiguation)
+    "docling>=2.0",
 ]
 
 [project.optional-dependencies]
