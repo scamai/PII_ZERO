@@ -46,6 +46,10 @@ class VLMExtractor:
     MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
     MODEL_ID_FP8 = "Qwen/Qwen3-VL-8B-Instruct-FP8"
 
+    # FP8 inference requires SM >= 8.9 (RTX 4090, H100).
+    # On older Ampere GPUs (SM 8.6, e.g. RTX 3090), we must load in bfloat16.
+    FP8_MIN_SM = 8.9
+
     def __init__(self, model_id: str | None = None, prefer_gpu: bool = True):
         self._model_id = model_id or self.MODEL_ID_FP8
         self._prefer_gpu = prefer_gpu
@@ -63,55 +67,56 @@ class VLMExtractor:
             return
 
         import torch
-        from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+        from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
         logger.info("Loading VLM: %s", self._model_id)
 
-        load_kwargs: dict[str, Any] = {
-            "trust_remote_code": True,
-            "torch_dtype": "auto",
-        }
+        # Resolve model_id based on GPU compute capability.
+        # FP8 inference requires SM >= 8.9 (RTX 4090, H100).
+        # On SM 8.6 (RTX 3090) we fall back to the base bf16 model.
+        model_id = self._model_id
+        dtype: Any = "auto"
 
         if self._prefer_gpu and torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(0)
+            sm = props.major + props.minor / 10.0
+            vram_gb = props.total_memory / 1e9
+            logger.info("GPU: %s (SM %.1f, %.1f GB VRAM)", props.name, sm, vram_gb)
+
+            if sm < self.FP8_MIN_SM and self.MODEL_ID_FP8 in model_id:
+                model_id = self.MODEL_ID  # swap FP8 → base model
+                dtype = torch.bfloat16
+                logger.info(
+                    "SM %.1f < %.1f: FP8 needs Ada/Hopper — using base model %s in bfloat16",
+                    sm, self.FP8_MIN_SM, model_id,
+                )
+
             try:
-                self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                    self._model_id,
-                    device_map="cuda:0",
-                    **load_kwargs,
+                self._model = Qwen3VLForConditionalGeneration.from_pretrained(
+                    model_id,
+                    device_map="auto",
+                    dtype=dtype,
+                    trust_remote_code=True,
                 )
-                self._device = "cuda:0"
-                vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-                logger.info("VLM loaded on GPU (%.1f GB VRAM)", vram_gb)
+                self._device = "cuda"
+                logger.info("VLM loaded on GPU (model=%s, dtype=%s)", model_id, dtype)
             except (RuntimeError, torch.cuda.OutOfMemoryError) as exc:
-                logger.warning(
-                    "GPU load failed (%s) — falling back to CPU", exc
-                )
+                logger.warning("GPU load failed (%s) — falling back to CPU", exc)
                 self._model = None
                 self._device = None
 
         if self._model is None:
-            # CPU fallback — 4-bit quantization to stay within RAM budget
-            try:
-                from transformers import BitsAndBytesConfig
-                bnb_config = BitsAndBytesConfig(load_in_4bit=True)
-                self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                    self._model_id,
-                    device_map="cpu",
-                    quantization_config=bnb_config,
-                    **load_kwargs,
-                )
-                self._device = "cpu"
-                logger.info("VLM loaded on CPU (4-bit quantized)")
-            except Exception:
-                # bitsandbytes may not support CPU — try plain CPU
-                self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                    self._model_id,
-                    device_map="cpu",
-                    torch_dtype=torch.float32,
-                    trust_remote_code=True,
-                )
-                self._device = "cpu"
-                logger.info("VLM loaded on CPU (float32)")
+            # CPU: always use the base (non-FP8) model in float32
+            base_id = self.MODEL_ID
+            logger.info("Loading VLM on CPU in float32 (model=%s)", base_id)
+            self._model = Qwen3VLForConditionalGeneration.from_pretrained(
+                base_id,
+                device_map="cpu",
+                dtype=torch.float32,
+                trust_remote_code=True,
+            )
+            self._device = "cpu"
+            logger.info("VLM loaded on CPU (float32)")
 
         self._processor = AutoProcessor.from_pretrained(
             self._model_id, trust_remote_code=True
