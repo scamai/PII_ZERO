@@ -69,7 +69,7 @@ def _extract_pdf_text_boxes(pdf_path: Path) -> list[tuple[int, list[RedactionBox
     try:
         import fitz
 
-        from pii_redact.ner.presidio_setup import get_analyzer  # lazy
+        from pii_redact.ner.presidio_setup import build_analyzer_engine as get_analyzer  # lazy
 
         analyzer = get_analyzer()
         results_by_page: list[tuple[int, list[RedactionBox]]] = []
@@ -123,7 +123,7 @@ def _run_ocr_on_image(image, page_idx: int = 0) -> list[RedactionBox]:
     try:
         from paddleocr import PaddleOCR  # type: ignore[import]
 
-        from pii_redact.ner.presidio_setup import get_analyzer
+        from pii_redact.ner.presidio_setup import build_analyzer_engine as get_analyzer
 
         ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
         analyzer = get_analyzer()
@@ -781,9 +781,12 @@ class PIIRedactionPipeline:
         image,
         doc_type: DocumentType,
         page_idx: int,
-        image_path: Path | None = None,
     ) -> list[RedactionBox]:
         """Run VisualLayer + optional VLM extractor on an image array."""
+        import tempfile
+
+        import cv2
+
         boxes: list[RedactionBox] = []
 
         try:
@@ -797,13 +800,22 @@ class PIIRedactionPipeline:
         except Exception as exc:
             logger.warning("VisualLayer failed on page %d: %s", page_idx, exc)
 
-        if self._use_vlm and image_path is not None:
+        if self._use_vlm:
+            # Write array to a temp file so VLM can read it via PIL
             try:
-                vlm_boxes = self._get_vlm().extract(image_path, page=page_idx)
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    tmp_path = Path(tmp.name)
+                cv2.imwrite(str(tmp_path), image)
+                vlm_boxes = self._get_vlm().extract(tmp_path, page=page_idx)
                 boxes.extend(vlm_boxes)
                 logger.debug("VLM found %d entity candidate(s) on page %d", len(vlm_boxes), page_idx)
             except Exception as exc:
                 logger.warning("VLM extraction failed on page %d: %s", page_idx, exc)
+            finally:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         return boxes
 
