@@ -69,19 +69,42 @@ deprecated for multi-threaded Python 3.13.
 - [x] Config system (Pydantic settings + settings.yaml)
 - [x] 84+ passing tests (85 pass, 5 skip in isolated run)
 
-## Benchmark Baseline (regex-only, no ML)
+## Benchmark Results
+
+### Layer 1: Regex-only baseline
 Run: `python scripts/run_benchmark.py --dataset all --max-docs 200`
 
 | Dataset | P | R | F1 | Notes |
 |---------|---|---|----|-------|
-| TAB (555 docs) | 0.000 | 0.000 | 0.000 | TAB targets PERSON/ORG/LOC — gap for NLP/VLM |
-| Gretel Finance (200 docs) | 0.302 | 0.126 | 0.178 | EMAIL=0.867, DATE=0.412 |
+| TAB (200 docs) | 0.000 | 0.000 | 0.000 | TAB targets PERSON/ORG/LOC — no regex match |
+| Gretel Finance (200 docs) | 0.302 | 0.126 | 0.178 | EMAIL=0.867, DATE=0.412, IPV4=1.0 |
 
-**Key gaps identified:**
-- PHONE: 0.0 — Gretel uses PHONE_NUMBER label, our regex hits PHONE
-- SSN: 0.0 — need to check Gretel SSN format vs our pattern
-- PERSON/ORG/LOC: 0.0 — requires NLP (Presidio NER), not just regex
-- TAB gap: needs full NLP pipeline (names, orgs, demographic entities)
+### Layer 2: Presidio NER (spaCy + regex)
+Run: `CUDA_VISIBLE_DEVICES="" python scripts/run_benchmark_nlp.py --dataset all --max-docs 100 --min-score 0.6`
+
+| Dataset | P | R | F1 | Notes |
+|---------|---|---|----|-------|
+| TAB (100 docs) | 0.025 | 0.604 | 0.049 | High FP: legal text has many non-confidential entities |
+| Gretel Finance (100 docs) | 0.163 | 0.532 | 0.251 | +41% vs regex |
+
+**Gretel NLP per-entity highlights (min_score=0.6):**
+
+| Entity | P | R | F1 |
+|--------|---|---|----|
+| IP_ADDRESS | 0.875 | 1.000 | 0.933 |
+| EMAIL_ADDRESS | 0.929 | 0.867 | 0.897 |
+| DATE_TIME | 0.522 | 0.726 | 0.607 |
+| PHONE_NUMBER | 0.312 | 0.882 | 0.462 |
+| PERSON | 0.137 | 0.401 | 0.204 |
+| ORG | 0.056 | 0.365 | 0.098 |
+
+**TAB structural problem:** Court documents contain thousands of non-confidential ORG/LOC mentions (court names, agencies) that NER cannot distinguish from confidential ones. This requires document-level context, not span-level detection.
+
+**Key gaps remaining:**
+- CREDIT_CARD: 0.0 — Presidio recognizer exists but Gretel format may not match
+- LOCATION: 0.0 — span mismatch (Gretel annotates full addresses, spaCy detects city names)
+- ORG precision very low — needs context-aware filtering
+- PERSON precision 0.137 — spaCy finds many non-PII person references
 
 ## What's Next (priority order)
 1. [x] Fix full-suite segfault — excluded test_regex_patterns.py from default collection
@@ -90,11 +113,13 @@ Run: `python scripts/run_benchmark.py --dataset all --max-docs 200`
 4. [x] Implement `pii_redact.audit` — SQLite write_event / read_events
 5. [x] Integrate Qwen3-VL-8B-Instruct-FP8 (GPU-first, CPU fallback) into pipeline
 6. [x] Benchmark runner (scripts/run_benchmark.py) — TAB + Gretel Finance
-7. [ ] Fix label mapping (PHONE_NUMBER → PHONE, etc.) to improve Gretel F1
-8. [ ] Enable Presidio NLP layer in benchmark to close PERSON/ORG/LOC gap
-9. [ ] Download Qwen3-VL model weights and validate visual extraction on sample docs
-10. [ ] Wire Gradio UI to actual pipeline
-11. [ ] Hourly verification agent
+7. [x] Fix label mapping (ORGANIZATION→ORG, etc.) to improve Gretel F1
+8. [x] Enable Presidio NLP layer in benchmark (run_benchmark_nlp.py) — Gretel F1 +41%
+9. [x] Download Qwen3-VL model weights (complete: /home/benren/.cache/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct-FP8)
+10. [ ] Test VLM on a sample insurance document image
+11. [ ] Improve CREDIT_CARD and LOCATION detection (Gretel F1=0 for both)
+12. [ ] Wire Gradio UI to actual pipeline
+13. [ ] Hourly verification agent
 
 ## Test Tier Rules (CRITICAL — prevents machine OOM/kill)
 - **`pytest -m fast`** — pure Python only, no ML imports. Safe to run anytime. (<10s)

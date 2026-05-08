@@ -54,6 +54,7 @@ LABEL_MAP: dict[str, str] = {
     # TAB labels
     "PERSON": "PERSON",
     "ORG": "ORG",
+    "ORGANIZATION": "ORG",   # Gretel sometimes uses full word
     "LOC": "LOCATION",
     "DEM": "NRP",
     "CODE": "NRP",
@@ -100,7 +101,7 @@ def _get_analyzer():
     return _analyzer
 
 
-def run_nlp_ner(text: str) -> list[tuple[str, str]]:
+def run_nlp_ner(text: str, min_score: float = 0.6) -> list[tuple[str, str]]:
     """Run Presidio NER + custom insurance recognizers on text.
 
     Returns [(normalised_entity_type, span_text), ...]
@@ -114,6 +115,8 @@ def run_nlp_ner(text: str) -> list[tuple[str, str]]:
 
     findings: list[tuple[str, str]] = []
     for r in results:
+        if r.score < min_score:
+            continue
         span = text[r.start:r.end]
         findings.append((r.entity_type, span))
     return findings
@@ -124,7 +127,7 @@ def run_nlp_ner(text: str) -> list[tuple[str, str]]:
 # ---------------------------------------------------------------------------
 
 
-def run_tab(data_dir: Path, max_docs: int) -> dict:
+def run_tab(data_dir: Path, max_docs: int, min_score: float = 0.6) -> dict:
     from datasets import load_from_disk
 
     print(f"\n[TAB/NLP] Loading from {data_dir} ...")
@@ -153,7 +156,7 @@ def run_tab(data_dir: Path, max_docs: int) -> dict:
                 span = em.get("span_text") or text[em["start_offset"]:em["end_offset"]]
                 gold_entities.append((normalise_label(em.get("entity_type", "UNKNOWN")), span))
 
-        pred_entities = [(normalise_label(et), sp) for et, sp in run_nlp_ner(text)]
+        pred_entities = [(normalise_label(et), sp) for et, sp in run_nlp_ner(text, min_score)]
 
         gold_texts = [t for _, t in gold_entities]
         pred_texts = [t for _, t in pred_entities]
@@ -185,7 +188,7 @@ def run_tab(data_dir: Path, max_docs: int) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def run_gretel(data_dir: Path, max_docs: int) -> dict:
+def run_gretel(data_dir: Path, max_docs: int, min_score: float = 0.6) -> dict:
     from datasets import load_from_disk
 
     print(f"\n[Gretel/NLP] Loading from {data_dir} ...")
@@ -221,7 +224,7 @@ def run_gretel(data_dir: Path, max_docs: int) -> dict:
             label = normalise_label(span.get("label", "UNKNOWN"))
             gold_entities.append((label, text[s:e]))
 
-        pred_entities = [(normalise_label(et), sp) for et, sp in run_nlp_ner(text)]
+        pred_entities = [(normalise_label(et), sp) for et, sp in run_nlp_ner(text, min_score)]
 
         gold_texts = [t for _, t in gold_entities]
         pred_texts = [t for _, t in pred_entities]
@@ -284,6 +287,8 @@ def main() -> None:
     parser.add_argument("--dataset", choices=["tab", "gretel", "all"], default="gretel")
     parser.add_argument("--data-dir", default="./data/benchmarks")
     parser.add_argument("--max-docs", type=int, default=100)
+    parser.add_argument("--min-score", type=float, default=0.6,
+                        help="Presidio minimum confidence score (default 0.6)")
     parser.add_argument("--output", default="./data/benchmarks/results_nlp.json")
     args = parser.parse_args()
 
@@ -291,12 +296,12 @@ def main() -> None:
     all_results: list[dict] = []
 
     if args.dataset in ("tab", "all"):
-        r = run_tab(data_root / "tab", args.max_docs)
+        r = run_tab(data_root / "tab", args.max_docs, min_score=args.min_score)
         print_table(r)
         all_results.append(r)
 
     if args.dataset in ("gretel", "all"):
-        r = run_gretel(data_root / "gretel_finance", args.max_docs)
+        r = run_gretel(data_root / "gretel_finance", args.max_docs, min_score=args.min_score)
         print_table(r)
         all_results.append(r)
 

@@ -86,6 +86,15 @@ def build_analyzer_engine() -> "AnalyzerEngine":
     registry = RecognizerRegistry()
     registry.load_predefined_recognizers(nlp_engine=nlp_engine)
 
+    # UsBankRecognizer produces extreme FPs on financial text (precision ~0.03).
+    # Our custom ROUTING_NUM recognizer with context requirements is more precise.
+    for noisy in ("UsBankRecognizer",):
+        try:
+            registry.remove_recognizer(noisy)
+            logger.debug("Removed built-in recognizer: %s", noisy)
+        except Exception:
+            pass
+
     for recognizer in PRESIDIO_RECOGNIZER_LIST:
         registry.add_recognizer(recognizer)
         logger.debug("Registered recognizer: %s", recognizer.name)
