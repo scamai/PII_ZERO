@@ -106,6 +106,78 @@ Run: `CUDA_VISIBLE_DEVICES="" python scripts/run_benchmark_nlp.py --dataset all 
 - ORG precision very low — needs context-aware filtering
 - PERSON precision 0.137 — spaCy finds many non-PII person references
 
+## Sprint 2 Implementation Plan (parallel, May 2026)
+
+Four independent work streams running in parallel git worktrees.
+Merge order after completion: NMS → Surya → GLiNER → Docling.
+
+### S2-1: Surya OCR — replace dead PaddleOCR path
+**Owner:** agent/surya-ocr  **Branch:** feat/surya-ocr
+- Install `surya-ocr` (MIT, pip-installable, 90+ languages)
+- Replace `_run_ocr_on_image()` in `pii_redact/pipeline.py` with Surya's
+  line-level text detection + recognition
+- Surya API: `from surya.recognition import run_recognition; from surya.detection import run_detection`
+- Keep the same return type: `list[RedactionBox]`
+- Update `pyproject.toml` dependencies
+- Add `@pytest.mark.slow` unit test: OCR a synthetic text PNG, verify boxes returned
+- **Why critical:** OCR path currently silently fails. All scanned forms (majority of
+  real insurance workflows) produce zero detections.
+
+### S2-2: GLiNER-PII as Layer 4 NER
+**Owner:** agent/gliner  **Branch:** feat/gliner-pii
+- Install `gliner` (Apache 2.0)
+- New file: `pii_redact/ner/gliner_recognizer.py`
+  - Class `GLiNERRecognizer(EntityRecognizer)` (Presidio interface)
+  - Model: `nvidia/gliner-PII` (first choice) or `knowledgator/gliner-pii-large-v1`
+  - Entity prompts: `["person name", "organization employer name",
+    "social security number", "date of birth", "phone number",
+    "email address", "insurance policy number", "patient address"]`
+  - Lazy model load; CPU-capable (~400MB BERT-sized model)
+  - `invalidate_result` hook to block low-confidence spans
+- Wire into `pii_redact/ner/presidio_setup.py` (add to registry, after spaCy)
+- 34 fast unit tests minimum (mock model for fast tier; real model in slow tier)
+- Benchmark before/after on Gretel 50 docs to measure PERSON+ORG F1 delta
+- **Why high impact:** GLiNER entity prompts encode PII semantics directly
+  ("employer organization" ≠ "court agency"), far outperforming spaCy ORG class.
+
+### S2-3: Span deduplication NMS
+**Owner:** agent/nms  **Branch:** feat/span-nms
+- New function `deduplicate_boxes(boxes: list[RedactionBox]) -> list[RedactionBox]`
+  in `pii_redact/redact/engine.py`
+- Algorithm (two passes):
+  1. Text-span dedup: if two boxes have the same `text_found`, keep higher confidence;
+     break ties by entity-type specificity (SSN > PERSON > NRP)
+  2. Coordinate dedup (for image/raster boxes): IoU > 0.5 → keep higher confidence box
+- Wire into each sub-pipeline in `pii_redact/pipeline.py` after all layers merge,
+  before `_apply_pdf_redactions` / `_apply_image_redactions`
+- Entity-type specificity ranking (most specific first):
+  `US_SSN, NPI, EIN, DEA_NUM, ROUTING_NUM, POLICY_NUM, CLAIM_REF, ADJUSTER_ID,
+   CREDIT_CARD, IBAN_CODE, EMAIL_ADDRESS, PHONE_NUMBER, IP_ADDRESS,
+   DATE_TIME, PERSON, LOCATION, ORG, NRP`
+- ≥10 fast unit tests covering: exact duplicate, partial overlap, no overlap,
+  type-specificity tiebreak, coordinate IoU cases
+- **Why needed:** SSN detected by both custom SSN recognizer and Presidio US_SSN
+  creates double boxes. Audit log inflates counts. PDF gets double-thick rectangles.
+
+### S2-4: Docling layout-aware PDF parsing
+**Owner:** agent/docling  **Branch:** feat/docling-parser
+- Install `docling` (MIT, IBM Research)
+- New file: `pii_redact/layers/docling_parser.py`
+  - `extract_text_with_layout(pdf_path) -> list[LayoutSpan]`
+  - `LayoutSpan`: text, bbox, page, field_label (e.g. "Employer", "Patient Name"),
+    block_type ("form_field", "table_cell", "paragraph", "header")
+  - High-value field labels (always redact if ORG/PERSON detected): employer,
+    insured name, patient name, policy holder, claimant
+  - Low-value field labels (skip NER, context-only): insurer, court, agency name
+- Modify `_extract_pdf_text_boxes()` in `pipeline.py`: if Docling available,
+  use `extract_text_with_layout()`; else fall back to current PyMuPDF extraction
+- `is_high_value_field()` helper: returns True if field_label matches insurance PII fields
+- ≥8 fast unit tests (mock Docling, test field routing logic)
+- **Why needed:** Gives field-level context for ORG disambiguation. "GreenTech Inc."
+  in an Employer field → always redact. Same company in an Insurer field → skip.
+
+---
+
 ## What's Next (priority order)
 1. [x] Fix full-suite segfault — excluded test_regex_patterns.py from default collection
 2. [x] Fix infinite subprocess recursion in conftest.py (_PYTEST_SUBPROCESS_WORKER sentinel)
