@@ -437,7 +437,8 @@ class TestDEAPattern:
 class TestRecognizerListCompleteness:
     EXPECTED_ENTITIES = {
         "SSN", "NPI", "EIN", "ICD10_CODE", "CPT_CODE",
-        "POLICY_NUM", "ROUTING_NUM", "ADJUSTER_ID", "CLAIM_REF", "DEA_NUM",
+        "POLICY_NUM", "US_BANK_NUMBER", "ADJUSTER_ID", "CLAIM_REF", "DEA_NUM",
+        "CREDIT_CARD", "SWIFT_BIC_CODE", "CREDIT_CARD_SECURITY_CODE",
     }
 
     def test_all_expected_entities_in_list(self, recognizers):

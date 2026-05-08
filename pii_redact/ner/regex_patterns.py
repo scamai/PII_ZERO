@@ -132,7 +132,7 @@ _policy_recognizer = PatternRecognizer(
 # ABA routing number — 9 digits starting with 0-3 (or 6-7 for certain)
 # ---------------------------------------------------------------------------
 _routing_recognizer = PatternRecognizer(
-    supported_entity="ROUTING_NUM",
+    supported_entity="US_BANK_NUMBER",
     name="RoutingNumber_Recognizer",
     patterns=[
         Pattern(
@@ -220,11 +220,15 @@ _dea_recognizer = PatternRecognizer(
 # 19-digit Maestro/Visa Electron cards; validates Luhn checksum.
 # ---------------------------------------------------------------------------
 class CreditCard19Recognizer(PatternRecognizer):
-    """Covers 13-19 digit credit/debit cards (Visa, Mastercard, Amex, Maestro, Discover)."""
+    """Covers 13-19 digit credit/debit cards (Visa, Mastercard, Amex, Maestro, Discover).
+
+    Base score 0.65: Luhn validation provides strong signal; context enhancer
+    adds 0.15 more when card-related keywords appear nearby (→ 0.8).
+    """
 
     PATTERNS = [
-        Pattern("cc_16_spaced", r"\b(?:\d[ -]?){12,18}\d\b", score=0.5),
-        Pattern("cc_compact", r"\b\d{13,19}\b", score=0.5),
+        Pattern("cc_16_spaced", r"\b(?:\d[ -]?){12,18}\d\b", score=0.65),
+        Pattern("cc_compact", r"\b\d{13,19}\b", score=0.65),
     ]
     CONTEXT = [
         "credit", "debit", "card", "visa", "mastercard", "maestro", "amex",
@@ -258,6 +262,57 @@ class CreditCard19Recognizer(PatternRecognizer):
 
 
 _credit_card_recognizer = CreditCard19Recognizer()
+
+# ---------------------------------------------------------------------------
+# SWIFT/BIC code — 8 or 11 character bank identifier code
+# Format: AAAA BB CC [DDD]  where A=bank, B=country, C=location, D=branch
+# ---------------------------------------------------------------------------
+_swift_bic_recognizer = PatternRecognizer(
+    supported_entity="SWIFT_BIC_CODE",
+    name="SwiftBic_Recognizer",
+    patterns=[
+        # Base score 0.40: requires context keywords to reach ≥0.6 threshold.
+        # SWIFT codes (8/11 chars) collide with company abbreviations and
+        # all-caps words — context is mandatory to avoid FP explosion.
+        Pattern(
+            name="swift_bic_11",
+            regex=r"\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}[A-Z0-9]{3}\b",
+            score=0.40,
+        ),
+        Pattern(
+            name="swift_bic_8",
+            regex=r"\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}\b",
+            score=0.40,
+        ),
+    ],
+    context=[
+        "swift", "bic", "swift code", "bic code", "bank identifier",
+        "international transfer", "wire", "iban", "bank code",
+    ],
+)
+
+# ---------------------------------------------------------------------------
+# CVV / CVC — 3-4 digit card security code, always near card keywords
+# ---------------------------------------------------------------------------
+_cvv_recognizer = PatternRecognizer(
+    supported_entity="CREDIT_CARD_SECURITY_CODE",
+    name="CVV_Recognizer",
+    patterns=[
+        # Base score 0.40: below the 0.6 detection threshold on its own.
+        # Context enhancer adds ~0.35 when cvv/cvc keywords appear → total 0.75.
+        # This ensures we only flag CVV when explicitly labeled, avoiding FPs
+        # on amounts ($123), zip codes, or SSN substrings.
+        Pattern(
+            name="cvv_3_4_digit",
+            regex=r"\b\d{3,4}\b",
+            score=0.40,
+        ),
+    ],
+    context=[
+        "cvv", "cvc", "cvc2", "cvv2", "cid", "security code",
+        "card verification", "card security",
+    ],
+)
 
 # ---------------------------------------------------------------------------
 # ADDRESS — US-style street addresses  (e.g. "123 Maple Street")
@@ -298,5 +353,7 @@ PRESIDIO_RECOGNIZER_LIST: list[PatternRecognizer] = [
     _claim_ref_recognizer,
     _dea_recognizer,
     _credit_card_recognizer,
+    _swift_bic_recognizer,
+    _cvv_recognizer,
     _address_recognizer,
 ]

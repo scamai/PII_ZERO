@@ -45,7 +45,15 @@ LABEL_MAP: dict[str, str] = {
     "DATE_TIME": "DATE_TIME",
     "SSN": "US_SSN",
     "BANK_ROUTING_NUMBER": "US_BANK_NUMBER",
+    "ROUTING_NUM": "US_BANK_NUMBER",        # align our entity type with gold
     "CREDIT_CARD_NUMBER": "CREDIT_CARD",
+    "CREDIT_CARD_SECURITY_CODE": "CREDIT_CARD_SECURITY_CODE",
+    "SWIFT_BIC_CODE": "SWIFT_BIC_CODE",
+    "BBAN": "BBAN",
+    "ACCOUNT_PIN": "ACCOUNT_PIN",
+    "PASSWORD": "PASSWORD",
+    "API_KEY": "API_KEY",
+    "USER_NAME": "NRP",                     # treat as NRP (de-identified ID)
     "ZIP": "ZIP_CODE",
     "IPV4": "IP_ADDRESS",
     "IPV6": "IP_ADDRESS",
