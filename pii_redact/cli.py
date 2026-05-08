@@ -228,6 +228,33 @@ def restore(redacted_file: str, vault_path: str | None, output_path: str | None)
 
 
 # ---------------------------------------------------------------------------
+# ui
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.option("--port", default=7860, show_default=True, help="Local TCP port.")
+@click.option("--vlm", is_flag=True, default=False, help="Enable Qwen3-VL visual extractor (slow, loads ~16GB model).")
+@click.option("--config", "-c", "config_path", default=None, help="Path to settings.yaml.")
+def ui(port: int, vlm: bool, config_path: str | None) -> None:
+    """Launch the local Gradio web UI on http://127.0.0.1:PORT.
+
+    Never shares data to Gradio cloud — fully local.
+    """
+    from pii_redact.config import load_settings
+    from pii_redact.pipeline import PIIRedactionPipeline
+    from pii_redact.ui import launch_ui
+
+    settings = load_settings(config_path) if config_path else load_settings()
+    pipeline = PIIRedactionPipeline(settings, use_vlm=vlm)
+
+    click.echo(f"Launching pii-redact UI on http://127.0.0.1:{port}")
+    if vlm:
+        click.echo("VLM enabled — model loads on first document (may take ~4s).")
+    launch_ui(pipeline, port=port)
+
+
+# ---------------------------------------------------------------------------
 # download-models
 # ---------------------------------------------------------------------------
 

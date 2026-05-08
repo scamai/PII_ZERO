@@ -86,9 +86,10 @@ def build_analyzer_engine() -> "AnalyzerEngine":
     registry = RecognizerRegistry()
     registry.load_predefined_recognizers(nlp_engine=nlp_engine)
 
-    # UsBankRecognizer produces extreme FPs on financial text (precision ~0.03).
-    # Our custom ROUTING_NUM recognizer with context requirements is more precise.
-    for noisy in ("UsBankRecognizer",):
+    # Remove built-ins replaced by our custom recognizers:
+    # - UsBankRecognizer: FPs dominate (P~0.03); our ROUTING_NUM uses context
+    # - CreditCardRecognizer: misses 19-digit Maestro; replaced by CreditCard19Recognizer
+    for noisy in ("UsBankRecognizer", "CreditCardRecognizer"):
         try:
             registry.remove_recognizer(noisy)
             logger.debug("Removed built-in recognizer: %s", noisy)

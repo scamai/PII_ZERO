@@ -215,6 +215,75 @@ _dea_recognizer = PatternRecognizer(
 )
 
 # ---------------------------------------------------------------------------
+# CREDIT_CARD — 13-19 digit cards (Visa, Mastercard, Amex, Maestro, Discover)
+# Extends coverage beyond Presidio's built-in CreditCardRecognizer to include
+# 19-digit Maestro/Visa Electron cards; validates Luhn checksum.
+# ---------------------------------------------------------------------------
+class CreditCard19Recognizer(PatternRecognizer):
+    """Covers 13-19 digit credit/debit cards (Visa, Mastercard, Amex, Maestro, Discover)."""
+
+    PATTERNS = [
+        Pattern("cc_16_spaced", r"\b(?:\d[ -]?){12,18}\d\b", score=0.5),
+        Pattern("cc_compact", r"\b\d{13,19}\b", score=0.5),
+    ]
+    CONTEXT = [
+        "credit", "debit", "card", "visa", "mastercard", "maestro", "amex",
+        "discover", "payment", "card number", "cc", "cvv",
+    ]
+
+    def __init__(self) -> None:
+        super().__init__(
+            supported_entity="CREDIT_CARD",
+            patterns=self.PATTERNS,
+            context=self.CONTEXT,
+            supported_language="en",
+        )
+
+    def invalidate_result(self, pattern_text: str) -> bool:  # type: ignore[override]
+        digits = pattern_text.replace(" ", "").replace("-", "")
+        if not digits.isdigit():
+            return True
+        if not (13 <= len(digits) <= 19):
+            return True
+        # Luhn check
+        total = 0
+        for i, d in enumerate(reversed(digits)):
+            n = int(d)
+            if i % 2 == 1:
+                n *= 2
+                if n > 9:
+                    n -= 9
+            total += n
+        return total % 10 != 0  # True = invalid
+
+
+_credit_card_recognizer = CreditCard19Recognizer()
+
+# ---------------------------------------------------------------------------
+# ADDRESS — US-style street addresses  (e.g. "123 Maple Street")
+# ---------------------------------------------------------------------------
+_address_recognizer = PatternRecognizer(
+    supported_entity="LOCATION",
+    name="Address_Recognizer",
+    patterns=[
+        Pattern(
+            name="us_street_address",
+            regex=(
+                r"\b\d{1,5}\s+(?:[A-Z][A-Za-z]*\s+){1,4}"
+                r"(?:Street|St|Avenue|Ave|Boulevard|Blvd|Road|Rd|Drive|Dr|"
+                r"Lane|Ln|Court|Ct|Way|Place|Pl|Circle|Trail|Terrace|"
+                r"Parkway|Pkwy|Highway|Hwy|Square|Estates|Lodge|Plaza|Commons)\b"
+            ),
+            score=0.65,
+        ),
+    ],
+    context=[
+        "address", "addr", "street", "residence", "located at",
+        "resides at", "home address", "mailing address", "billing address",
+    ],
+)
+
+# ---------------------------------------------------------------------------
 # Exported list consumed by presidio_setup.py
 # ---------------------------------------------------------------------------
 PRESIDIO_RECOGNIZER_LIST: list[PatternRecognizer] = [
@@ -228,4 +297,6 @@ PRESIDIO_RECOGNIZER_LIST: list[PatternRecognizer] = [
     _adjuster_id_recognizer,
     _claim_ref_recognizer,
     _dea_recognizer,
+    _credit_card_recognizer,
+    _address_recognizer,
 ]

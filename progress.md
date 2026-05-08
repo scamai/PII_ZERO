@@ -127,23 +127,40 @@ Run: `CUDA_VISIBLE_DEVICES="" python scripts/run_benchmark_nlp.py --dataset all 
 12. [ ] Improve CREDIT_CARD detection (Presidio requires Luhn validation — Gretel uses fake nums)
 13. [ ] Improve LOCATION by routing addresses through VLM instead of spaCy (VLM detects full address)
 14. [x] Wire VLM into full pipeline — pipeline._run_visual_layer writes temp PNG, passes to VLM
-15. [ ] Wire Gradio UI to actual pipeline
+15. [x] Wire Gradio UI to actual pipeline — `pii-redact ui [--port 7860] [--vlm]` command added
 16. [x] Hourly verification agent — cron job db335ee6 (fires :13 past every hour, 7-day TTL)
     - Runs: fast tests + Gretel NLP benchmark + git log check
     - Baseline: Gretel F1=0.243, EMAIL=0.897, IBAN=0.957, IP=0.933
 
 ## Current Benchmark Baselines
-| Dataset | Layer | P | R | F1 | Notes |
-|---------|-------|---|---|----|-------|
-| Gretel (100 docs) | Regex only | 0.302 | 0.126 | 0.178 | email, ip only |
-| Gretel (100 docs) | Presidio NLP | 0.164 | 0.469 | 0.243 | +37% vs regex |
-| TAB (100 docs) | Presidio NLP | 0.025 | 0.604 | 0.049 | structural FP problem |
+
+### Gretel Finance (100 docs, Presidio NLP, min_score=0.6)
+| Metric mode | P | R | F1 | Notes |
+|-------------|---|---|----|-------|
+| Exact span | 0.163 | 0.471 | 0.242 | Strict: predicted must equal gold span exactly |
+| Partial overlap | 0.432 | 0.895 | **0.583** | Either span is substring of other — correct metric for redaction |
+
+**Per-entity highlights (partial match):**
+| Entity | P | R | F1 |
+|--------|---|---|----|
+| EMAIL_ADDRESS | 1.000 | 0.933 | 0.966 |
+| IBAN_CODE | 1.000 | 0.917 | 0.957 |
+| IP_ADDRESS | 0.875 | 1.000 | 0.933 |
+| DATE_TIME | 0.891 | 0.895 | 0.893 |
+| LOCATION | 0.254 | 0.544 | 0.347 |
+| PERSON | 0.273 | 0.781 | 0.405 |
+| ORG | 0.129 | 0.750 | 0.220 |
+
+### TAB (100 docs) — known hard problem
+| Layer | F1 (exact) | Notes |
+|-------|-----------|-------|
+| Presidio NLP | 0.049 | Legal docs: many non-confidential ORG/LOC entities |
 
 ## Known Limitations
-- CREDIT_CARD: Gretel uses 19-digit Maestro numbers; Presidio regex doesn't cover them
-- LOCATION: Full address span mismatch (Gretel: full street; spaCy NER: city name only)
-- TAB precision: Court documents have thousands of non-confidential ORG/LOC mentions
-- VLM inference: ~12s per page on RTX 3090 bfloat16; model loads in ~4s
+- CREDIT_CARD: Gretel test set has Luhn-invalid and non-English-context CCs → F1=0 in benchmark
+  - Production: detects "Credit Card Number: 4532015112830366" correctly
+- TAB precision: Court documents mention thousands of public orgs/locations → structural FP problem
+- VLM inference: ~12s per page on RTX 3090 bfloat16; model loads in ~4s (cached across docs)
 
 ## Test Tier Rules (CRITICAL — prevents machine OOM/kill)
 - **`pytest -m fast`** — pure Python only, no ML imports. Safe to run anytime. (<10s)

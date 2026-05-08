@@ -82,10 +82,19 @@ def normalise_label(raw: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def compute_f1(predicted: list[str], gold: list[str]) -> dict:
-    tp = sum(1 for p in predicted if p in gold)
+def _overlaps(a: str, b: str) -> bool:
+    """True if either string is a non-empty substring of the other."""
+    return bool(a) and bool(b) and (a in b or b in a)
+
+
+def compute_f1(predicted: list[str], gold: list[str], partial: bool = False) -> dict:
+    if partial:
+        tp = sum(1 for p in predicted if any(_overlaps(p, g) for g in gold))
+        fn = sum(1 for g in gold if not any(_overlaps(g, p) for p in predicted))
+    else:
+        tp = sum(1 for p in predicted if p in gold)
+        fn = sum(1 for g in gold if g not in predicted)
     fp = len(predicted) - tp
-    fn = sum(1 for g in gold if g not in predicted)
     p = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
@@ -136,7 +145,7 @@ def run_nlp_ner(text: str, min_score: float = 0.6) -> list[tuple[str, str]]:
 # ---------------------------------------------------------------------------
 
 
-def run_tab(data_dir: Path, max_docs: int, min_score: float = 0.6) -> dict:
+def run_tab(data_dir: Path, max_docs: int, min_score: float = 0.6, partial: bool = False) -> dict:
     from datasets import load_from_disk
 
     print(f"\n[TAB/NLP] Loading from {data_dir} ...")
@@ -184,8 +193,8 @@ def run_tab(data_dir: Path, max_docs: int, min_score: float = 0.6) -> dict:
             print(f"  [{n_docs}/{min(max_docs, len(split))} docs]")
 
     elapsed = time.monotonic() - t0
-    overall = compute_f1(all_pred, all_gold)
-    per_entity = {et: compute_f1(s["pred"], s["gold"]) for et, s in entity_stats.items()}
+    overall = compute_f1(all_pred, all_gold, partial=partial)
+    per_entity = {et: compute_f1(s["pred"], s["gold"], partial=partial) for et, s in entity_stats.items()}
 
     print(f"[TAB/NLP] {n_docs} docs | {elapsed:.1f}s | F1={overall['f1']:.3f}")
     return {"dataset": "TAB_NLP", "n_docs": n_docs, "elapsed_s": round(elapsed, 1),
@@ -197,7 +206,7 @@ def run_tab(data_dir: Path, max_docs: int, min_score: float = 0.6) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def run_gretel(data_dir: Path, max_docs: int, min_score: float = 0.6) -> dict:
+def run_gretel(data_dir: Path, max_docs: int, min_score: float = 0.6, partial: bool = False) -> dict:
     from datasets import load_from_disk
 
     print(f"\n[Gretel/NLP] Loading from {data_dir} ...")
@@ -252,12 +261,13 @@ def run_gretel(data_dir: Path, max_docs: int, min_score: float = 0.6) -> dict:
             print(f"  [{n_docs}/{max_docs} docs]")
 
     elapsed = time.monotonic() - t0
-    overall = compute_f1(all_pred, all_gold)
-    per_entity = {et: compute_f1(s["pred"], s["gold"]) for et, s in entity_stats.items()}
+    overall = compute_f1(all_pred, all_gold, partial=partial)
+    per_entity = {et: compute_f1(s["pred"], s["gold"], partial=partial) for et, s in entity_stats.items()}
 
-    print(f"[Gretel/NLP] {n_docs} docs | {elapsed:.1f}s | F1={overall['f1']:.3f}")
+    mode = "partial" if partial else "exact"
+    print(f"[Gretel/NLP] {n_docs} docs | {elapsed:.1f}s | F1={overall['f1']:.3f} ({mode})")
     return {"dataset": "Gretel_NLP", "n_docs": n_docs, "elapsed_s": round(elapsed, 1),
-            "overall": overall, "per_entity": per_entity}
+            "match_mode": mode, "overall": overall, "per_entity": per_entity}
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +308,8 @@ def main() -> None:
     parser.add_argument("--max-docs", type=int, default=100)
     parser.add_argument("--min-score", type=float, default=0.6,
                         help="Presidio minimum confidence score (default 0.6)")
+    parser.add_argument("--partial", action="store_true",
+                        help="Use partial/overlap span matching instead of exact match")
     parser.add_argument("--output", default="./data/benchmarks/results_nlp.json")
     args = parser.parse_args()
 
@@ -305,12 +317,12 @@ def main() -> None:
     all_results: list[dict] = []
 
     if args.dataset in ("tab", "all"):
-        r = run_tab(data_root / "tab", args.max_docs, min_score=args.min_score)
+        r = run_tab(data_root / "tab", args.max_docs, min_score=args.min_score, partial=args.partial)
         print_table(r)
         all_results.append(r)
 
     if args.dataset in ("gretel", "all"):
-        r = run_gretel(data_root / "gretel_finance", args.max_docs, min_score=args.min_score)
+        r = run_gretel(data_root / "gretel_finance", args.max_docs, min_score=args.min_score, partial=args.partial)
         print_table(r)
         all_results.append(r)
 
