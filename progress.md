@@ -126,9 +126,24 @@ Run: `CUDA_VISIBLE_DEVICES="" python scripts/run_benchmark_nlp.py --dataset all 
     - IBAN_CODE: F1=0.957 after fix
 12. [ ] Improve CREDIT_CARD detection (Presidio requires Luhn validation — Gretel uses fake nums)
 13. [ ] Improve LOCATION by routing addresses through VLM instead of spaCy (VLM detects full address)
-14. [ ] Wire VLM into full pipeline (currently standalone extractor)
+14. [x] Wire VLM into full pipeline — pipeline._run_visual_layer writes temp PNG, passes to VLM
 15. [ ] Wire Gradio UI to actual pipeline
-16. [ ] Hourly verification agent
+16. [x] Hourly verification agent — cron job db335ee6 (fires :13 past every hour, 7-day TTL)
+    - Runs: fast tests + Gretel NLP benchmark + git log check
+    - Baseline: Gretel F1=0.243, EMAIL=0.897, IBAN=0.957, IP=0.933
+
+## Current Benchmark Baselines
+| Dataset | Layer | P | R | F1 | Notes |
+|---------|-------|---|---|----|-------|
+| Gretel (100 docs) | Regex only | 0.302 | 0.126 | 0.178 | email, ip only |
+| Gretel (100 docs) | Presidio NLP | 0.164 | 0.469 | 0.243 | +37% vs regex |
+| TAB (100 docs) | Presidio NLP | 0.025 | 0.604 | 0.049 | structural FP problem |
+
+## Known Limitations
+- CREDIT_CARD: Gretel uses 19-digit Maestro numbers; Presidio regex doesn't cover them
+- LOCATION: Full address span mismatch (Gretel: full street; spaCy NER: city name only)
+- TAB precision: Court documents have thousands of non-confidential ORG/LOC mentions
+- VLM inference: ~12s per page on RTX 3090 bfloat16; model loads in ~4s
 
 ## Test Tier Rules (CRITICAL — prevents machine OOM/kill)
 - **`pytest -m fast`** — pure Python only, no ML imports. Safe to run anytime. (<10s)
