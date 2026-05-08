@@ -129,40 +129,28 @@ def _extract_pdf_text_boxes(pdf_path: Path) -> list[tuple[int, list[RedactionBox
 
 
 def _run_ocr_on_image(image, page_idx: int = 0) -> list[RedactionBox]:
-    """Run PaddleOCR + Presidio NER on a numpy image array."""
+    """Run Surya OCR + Presidio NER on a numpy image array."""
     boxes: list[RedactionBox] = []
     try:
-        from paddleocr import PaddleOCR  # type: ignore[import]
-
+        from pii_redact.layers.surya_ocr import ocr_image
+        from pii_redact.ner.entity_filters import is_valid_org, is_valid_person
         from pii_redact.ner.presidio_setup import build_analyzer_engine as get_analyzer
 
-        ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
         analyzer = get_analyzer()
+        ocr_lines = ocr_image(image)
 
-        result = ocr.ocr(image, cls=True)
-        if not result or not result[0]:
-            return []
-
-        for line in result[0]:
-            if not line:
-                continue
-            coords, (text, confidence) = line
-            # coords: [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
-            xs = [pt[0] for pt in coords]
-            ys = [pt[1] for pt in coords]
-            x, y = int(min(xs)), int(min(ys))
-            w = int(max(xs) - min(xs))
-            h = int(max(ys) - min(ys))
-
-            if not text.strip():
-                continue
+        for line in ocr_lines:
+            text = line["text"]
+            x1, y1, x2, y2 = line["bbox"]
+            x, y = x1, y1
+            w = x2 - x1
+            h = y2 - y1
 
             try:
                 hits = analyzer.analyze(text=text, language="en")
             except Exception:
                 hits = []
 
-            from pii_redact.ner.entity_filters import is_valid_org, is_valid_person
             for hit in hits:
                 span_text = text[hit.start:hit.end]
                 if hit.entity_type == "ORGANIZATION" and not is_valid_org(span_text, text):
@@ -177,9 +165,9 @@ def _run_ocr_on_image(image, page_idx: int = 0) -> list[RedactionBox]:
                         h=h,
                         entity_type=hit.entity_type,
                         confidence=hit.score,
-                        source="presidio",
+                        source="surya_ocr",
                         page=page_idx,
-                        text_found=text[hit.start:hit.end],
+                        text_found=span_text,
                     )
                 )
     except Exception as exc:
@@ -191,26 +179,18 @@ def _run_insurance_ner_on_image(image, page_idx: int = 0) -> list[RedactionBox]:
     """Run domain-specific insurance NER over OCR text."""
     boxes: list[RedactionBox] = []
     try:
+        from pii_redact.layers.surya_ocr import ocr_image
         from pii_redact.ner.insurance_ner import InsuranceNER  # lazy
 
         ins_ner = InsuranceNER()
+        ocr_lines = ocr_image(image)
 
-        from paddleocr import PaddleOCR  # type: ignore[import]
-
-        ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
-        result = ocr.ocr(image, cls=True)
-        if not result or not result[0]:
-            return []
-
-        for line in result[0]:
-            if not line:
-                continue
-            coords, (text, _confidence) = line
-            xs = [pt[0] for pt in coords]
-            ys = [pt[1] for pt in coords]
-            x, y = int(min(xs)), int(min(ys))
-            w = int(max(xs) - min(xs))
-            h = int(max(ys) - min(ys))
+        for line in ocr_lines:
+            text = line["text"]
+            x1, y1, x2, y2 = line["bbox"]
+            x, y = x1, y1
+            w = x2 - x1
+            h = y2 - y1
 
             try:
                 hits = ins_ner.analyze(text)
@@ -851,31 +831,21 @@ class PIIRedactionPipeline:
         """Run scispaCy NER over OCR text from *image*."""
         boxes: list[RedactionBox] = []
         try:
-            from paddleocr import PaddleOCR  # type: ignore[import]
-
             from pii_redact.config import settings as cfg
+            from pii_redact.layers.surya_ocr import ocr_image
 
             scispacy_model = cfg.models.get("scispacy_model", "en_core_sci_lg")
             import spacy
 
             nlp = spacy.load(scispacy_model)
+            ocr_lines = ocr_image(image)
 
-            ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
-            result = ocr.ocr(image, cls=True)
-            if not result or not result[0]:
-                return []
-
-            for line in result[0]:
-                if not line:
-                    continue
-                coords, (text, _confidence) = line
-                if not text.strip():
-                    continue
-                xs = [pt[0] for pt in coords]
-                ys = [pt[1] for pt in coords]
-                x, y = int(min(xs)), int(min(ys))
-                w = int(max(xs) - min(xs))
-                h = int(max(ys) - min(ys))
+            for line in ocr_lines:
+                text = line["text"]
+                x1, y1, x2, y2 = line["bbox"]
+                x, y = x1, y1
+                w = x2 - x1
+                h = y2 - y1
 
                 doc = nlp(text)
                 for ent in doc.ents:
