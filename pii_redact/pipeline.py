@@ -94,7 +94,17 @@ def _extract_pdf_text_boxes(pdf_path: Path) -> list[tuple[int, list[RedactionBox
                             except Exception:
                                 hits = []
 
+                            from pii_redact.ner.entity_filters import (
+                                is_valid_org, is_valid_person,
+                            )
                             for hit in hits:
+                                span_text = text[hit.start:hit.end]
+                                if hit.entity_type == "ORGANIZATION":
+                                    if not is_valid_org(span_text, text):
+                                        continue
+                                elif hit.entity_type == "PERSON":
+                                    if not is_valid_person(span_text):
+                                        continue
                                 page_boxes.append(
                                     RedactionBox(
                                         x=x0,
@@ -105,7 +115,7 @@ def _extract_pdf_text_boxes(pdf_path: Path) -> list[tuple[int, list[RedactionBox
                                         confidence=hit.score,
                                         source="presidio",
                                         page=page_idx,
-                                        text_found=text[hit.start:hit.end],
+                                        text_found=span_text,
                                     )
                                 )
                 results_by_page.append((page_idx, page_boxes))
@@ -151,7 +161,13 @@ def _run_ocr_on_image(image, page_idx: int = 0) -> list[RedactionBox]:
             except Exception:
                 hits = []
 
+            from pii_redact.ner.entity_filters import is_valid_org, is_valid_person
             for hit in hits:
+                span_text = text[hit.start:hit.end]
+                if hit.entity_type == "ORGANIZATION" and not is_valid_org(span_text, text):
+                    continue
+                if hit.entity_type == "PERSON" and not is_valid_person(span_text):
+                    continue
                 boxes.append(
                     RedactionBox(
                         x=x,

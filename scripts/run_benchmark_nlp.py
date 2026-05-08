@@ -147,7 +147,7 @@ def _is_english_context(text: str, start: int, end: int) -> bool:
 
 
 # Entity types where foreign-language FPs are common (NLP-driven, not pattern-driven)
-_LANG_FILTER_TYPES = {"PERSON", "ORG", "LOCATION"}
+_LANG_FILTER_TYPES = {"PERSON", "ORGANIZATION", "ORG", "LOCATION"}
 
 
 def run_nlp_ner(text: str, min_score: float = 0.6) -> list[tuple[str, str]]:
@@ -155,6 +155,8 @@ def run_nlp_ner(text: str, min_score: float = 0.6) -> list[tuple[str, str]]:
 
     Returns [(normalised_entity_type, span_text), ...]
     """
+    from pii_redact.ner.entity_filters import is_valid_org, is_valid_person
+
     analyzer = _get_analyzer()
     try:
         results = analyzer.analyze(text=text, language="en")
@@ -167,10 +169,23 @@ def run_nlp_ner(text: str, min_score: float = 0.6) -> list[tuple[str, str]]:
         if r.score < min_score:
             continue
         span = text[r.start:r.end]
+
         # Drop NLP-detected spans that sit in non-English context windows
         if r.entity_type in _LANG_FILTER_TYPES:
             if not _is_english_context(text, r.start, r.end):
                 continue
+
+        # ORG structural quality filter: drop role words, acronyms, artifacts
+        if r.entity_type == "ORGANIZATION":
+            ctx = text[max(0, r.start - 100): r.end + 100]
+            if not is_valid_org(span, ctx):
+                continue
+
+        # PERSON single-word label filter
+        if r.entity_type == "PERSON":
+            if not is_valid_person(span):
+                continue
+
         findings.append((r.entity_type, span))
     return findings
 

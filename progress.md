@@ -138,6 +138,14 @@ Run: `CUDA_VISIBLE_DEVICES="" python scripts/run_benchmark_nlp.py --dataset all 
     - Generates real CMS-1500 PDF with PyMuPDF, 11 PII fields, 9 pytest assertions
     - Verifies: PERSON, DATE_TIME, US_SSN, PHONE_NUMBER, EMAIL_ADDRESS, POLICY_NUM all detected
     - Runs in 5s (scope=class fixture, pipeline loads once)
+19. [x] ORG structural quality filter (pii_redact/ner/entity_filters.py)
+    - Root cause: spaCy detects 124 ORGs in 20 docs, only ~25 are gold → 5:1 FP rate
+    - 5 FP categories: role words (Vendor/Client), all-caps acronyms (CMT/AI/PII), XML artifacts, lowercase spans, overlong phrases
+    - Fix: is_valid_org() blocklist + acronym regex + tech-char filter + length + context gate
+    - ORG P: 0.056→0.245 exact (+4.4x), 0.129→0.415 partial (+3.2x)
+    - Overall F1: 0.604→0.730 partial, 0.269→0.363 exact
+    - Also: is_valid_person() for form-label PERSON FPs ("Email", "Phone", "Address")
+    - 34 new fast unit tests in test_entity_filters.py; fast suite: 61→95 tests
 
 ## Current Benchmark Baselines
 
@@ -146,18 +154,19 @@ Run: `CUDA_VISIBLE_DEVICES="" python scripts/run_benchmark_nlp.py --dataset all 
 |-------------|---|---|----|-------|
 | Exact span | 0.163 | 0.471 | 0.242 | Strict: predicted must equal gold span exactly |
 | Partial overlap | 0.432 | 0.895 | **0.583** | Baseline (before langdetect filter) |
-| Partial overlap + langdetect | 0.489 | 0.787 | **0.604** | After PERSON/ORG language filter |
+| Partial overlap + langdetect | 0.489 | 0.787 | 0.604 | After PERSON/ORG language filter |
+| Partial + langdetect + entity_filters | 0.815 | 0.662 | **0.730** | After ORG structural quality filter |
 
-**Per-entity highlights (partial match, with langdetect filter):**
-| Entity | P | R | F1 | Delta vs baseline |
-|--------|---|---|----|-------------------|
+**Per-entity highlights (partial match, current):**
+| Entity | P | R | F1 | Delta vs original baseline |
+|--------|---|---|----|---------------------------|
 | EMAIL_ADDRESS | 1.000 | 0.933 | 0.966 | — |
 | IBAN_CODE | 1.000 | 0.917 | 0.957 | — |
 | IP_ADDRESS | 0.875 | 1.000 | 0.933 | — |
 | DATE_TIME | 0.891 | 0.895 | 0.893 | — |
-| PERSON | 0.653 | 0.413 | 0.506 | P: +139%, F1: +25% |
-| LOCATION | 0.426 | 0.349 | 0.384 | P: +68% |
-| ORG | 0.129 | 0.750 | 0.220 | unchanged (English FPs dominate) |
+| PERSON | 0.670 | 0.420 | 0.516 | P: +145%, F1: +27% |
+| LOCATION | 0.420 | 0.349 | 0.382 | P: +65% |
+| ORG | 0.415 | 0.182 | 0.253 | P: +222%, F1: +15% |
 
 ### TAB (100 docs) — known hard problem
 | Layer | F1 (exact) | Notes |
