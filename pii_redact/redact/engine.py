@@ -56,6 +56,127 @@ def _union_box(a: RedactionBox, b: RedactionBox) -> RedactionBox:
     )
 
 
+def deduplicate_boxes(boxes: list[RedactionBox]) -> list[RedactionBox]:
+    """Deduplicate overlapping redaction boxes using two independent passes.
+
+    Pass A — text-span deduplication:
+        Groups boxes by (page, text_found) where text_found is not None/empty.
+        Within each group, keeps the single box with highest confidence.
+        Tiebreaks by entity-type specificity score (higher = more specific type wins).
+
+    Pass B — coordinate IoU deduplication:
+        For boxes on the same page where text_found is None or empty, computes IoU.
+        Sorts by confidence descending; suppresses any box with IoU > 0.5 against
+        a kept box.
+
+    Args:
+        boxes: Raw detection boxes from one or more pipeline layers.
+
+    Returns:
+        Deduplicated list of RedactionBox objects.
+    """
+    if not boxes:
+        return []
+
+    # Entity-type specificity scores for tiebreaking
+    _TYPE_SPECIFICITY: dict[str, int] = {
+        "US_SSN": 100,
+        "NPI": 99,
+        "EIN": 98,
+        "DEA_NUM": 97,
+        "ROUTING_NUM": 96,
+        "POLICY_NUM": 95,
+        "CLAIM_REF": 94,
+        "ADJUSTER_ID": 93,
+        "CREDIT_CARD": 92,
+        "IBAN_CODE": 91,
+        "EMAIL_ADDRESS": 90,
+        "PHONE_NUMBER": 89,
+        "IP_ADDRESS": 88,
+        "DATE_TIME": 80,
+        "PERSON": 70,
+        "LOCATION": 60,
+        "ORG": 50,
+        "ORGANIZATION": 50,
+        "NRP": 40,
+    }
+
+    def _specificity(box: RedactionBox) -> int:
+        return _TYPE_SPECIFICITY.get(box.entity_type, 0)
+
+    def _sort_key(box: RedactionBox):
+        # Higher specificity first (most specific entity type wins),
+        # then higher confidence breaks remaining ties.
+        return (_specificity(box), box.confidence)
+
+    # Split into text-layer boxes (text_found set) and visual boxes (text_found empty/None)
+    text_boxes: list[RedactionBox] = []
+    visual_boxes: list[RedactionBox] = []
+    for b in boxes:
+        if b.text_found:  # non-empty string — text-layer detection
+            text_boxes.append(b)
+        else:
+            visual_boxes.append(b)
+
+    # ------------------------------------------------------------------
+    # Pass A: text-span deduplication
+    # ------------------------------------------------------------------
+    from collections import defaultdict
+
+    groups: dict[tuple[int, str], list[RedactionBox]] = defaultdict(list)
+    for b in text_boxes:
+        groups[(b.page, b.text_found)].append(b)
+
+    pass_a_result: list[RedactionBox] = []
+    for group in groups.values():
+        # Keep the box with highest (confidence, specificity)
+        best = max(group, key=_sort_key)
+        pass_a_result.append(best)
+
+    # ------------------------------------------------------------------
+    # Pass B: coordinate IoU deduplication (visual / raster boxes)
+    # ------------------------------------------------------------------
+
+    def _iou(a: RedactionBox, b: RedactionBox) -> float:
+        """Compute IoU of two axis-aligned boxes."""
+        # Intersection
+        ix1 = max(a.x, b.x)
+        iy1 = max(a.y, b.y)
+        ix2 = min(a.x + a.w, b.x + b.w)
+        iy2 = min(a.y + a.h, b.y + b.h)
+        if ix2 <= ix1 or iy2 <= iy1:
+            return 0.0
+        inter = (ix2 - ix1) * (iy2 - iy1)
+        union = a.w * a.h + b.w * b.h - inter
+        if union <= 0:
+            return 0.0
+        return inter / union
+
+    # Group visual boxes by page then apply NMS
+    by_page_visual: dict[int, list[RedactionBox]] = defaultdict(list)
+    for b in visual_boxes:
+        by_page_visual[b.page].append(b)
+
+    pass_b_result: list[RedactionBox] = []
+    for page_boxes in by_page_visual.values():
+        # Sort by confidence descending
+        sorted_boxes = sorted(page_boxes, key=lambda b: b.confidence, reverse=True)
+        kept: list[RedactionBox] = []
+        suppressed = [False] * len(sorted_boxes)
+        for i, candidate in enumerate(sorted_boxes):
+            if suppressed[i]:
+                continue
+            kept.append(candidate)
+            for j in range(i + 1, len(sorted_boxes)):
+                if suppressed[j]:
+                    continue
+                if _iou(candidate, sorted_boxes[j]) > 0.5:
+                    suppressed[j] = True
+        pass_b_result.extend(kept)
+
+    return pass_a_result + pass_b_result
+
+
 def merge_boxes(boxes: list[RedactionBox], padding: int = 0) -> list[RedactionBox]:
     """Pad, merge overlapping boxes per page, and sort by (page, y, x).
 

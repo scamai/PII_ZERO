@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from pii_redact.classifier import classify_document
 from pii_redact.models import DocumentResult, DocumentType, PageResult, RedactionBox
+from pii_redact.redact.engine import deduplicate_boxes
 
 if TYPE_CHECKING:
     from pii_redact.config import Settings
@@ -497,6 +498,10 @@ class PIIRedactionPipeline:
                 visual_boxes = self._run_visual_layer(img, doc_type, page_idx)
                 boxes_by_page.setdefault(page_idx, []).extend(visual_boxes)
 
+        # Deduplicate per page before building results
+        for page_idx in list(boxes_by_page.keys()):
+            boxes_by_page[page_idx] = deduplicate_boxes(boxes_by_page[page_idx])
+
         # Build page results
         all_pages = sorted(set(
             list(boxes_by_page.keys()) + [i for i, _ in (text_results or [])]
@@ -553,6 +558,7 @@ class PIIRedactionPipeline:
             boxes: list[RedactionBox] = []
             boxes.extend(_run_ocr_on_image(img, page_idx))
             boxes.extend(self._run_visual_layer(img, doc_type, page_idx))
+            boxes = deduplicate_boxes(boxes)
             page_ms = (time.monotonic() - t_page) * 1000
 
             boxes_by_page[page_idx] = boxes
@@ -595,6 +601,7 @@ class PIIRedactionPipeline:
         boxes: list[RedactionBox] = []
         if img is not None:
             boxes = self._run_visual_layer(img, doc_type, page_idx=0)
+        boxes = deduplicate_boxes(boxes)
 
         stripped_fields: list[str] = []
         if not dry_run:
@@ -634,6 +641,7 @@ class PIIRedactionPipeline:
         if img is not None:
             boxes.extend(_run_ocr_on_image(img, page_idx=0))
             boxes.extend(self._run_visual_layer(img, doc_type, page_idx=0))
+        boxes = deduplicate_boxes(boxes)
 
         stripped_fields: list[str] = []
         if not dry_run:
@@ -688,6 +696,7 @@ class PIIRedactionPipeline:
                 boxes_by_page[page_idx].extend(self._run_scispacy(img, page_idx))
 
             for page_idx in sorted(boxes_by_page):
+                boxes_by_page[page_idx] = deduplicate_boxes(boxes_by_page[page_idx])
                 page_results.append(
                     PageResult(
                         page=page_idx,
@@ -708,6 +717,7 @@ class PIIRedactionPipeline:
                 boxes.extend(_run_ocr_on_image(img, 0))
                 boxes.extend(_run_insurance_ner_on_image(img, 0))
                 boxes.extend(self._run_scispacy(img, 0))
+                boxes = deduplicate_boxes(boxes)
                 boxes_by_page[0] = boxes
                 page_results.append(
                     PageResult(page=0, doc_type=doc_type, redaction_boxes=boxes)
@@ -753,6 +763,7 @@ class PIIRedactionPipeline:
                 boxes_by_page[page_idx].extend(self._run_scispacy(img, page_idx))
 
             for page_idx in sorted(boxes_by_page):
+                boxes_by_page[page_idx] = deduplicate_boxes(boxes_by_page[page_idx])
                 page_results.append(
                     PageResult(page=page_idx, doc_type=doc_type, redaction_boxes=boxes_by_page[page_idx])
                 )
@@ -770,6 +781,7 @@ class PIIRedactionPipeline:
                 boxes.extend(self._run_visual_layer(img, doc_type, 0))
                 boxes.extend(_run_insurance_ner_on_image(img, 0))
                 boxes.extend(self._run_scispacy(img, 0))
+                boxes = deduplicate_boxes(boxes)
                 boxes_by_page[0] = boxes
                 page_results.append(
                     PageResult(page=0, doc_type=doc_type, redaction_boxes=boxes)
