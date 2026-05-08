@@ -1,264 +1,295 @@
 # PII Removal Tool — Build Progress
 
-## Architecture
-Thin Python orchestration layer (Path B):
-- **Presidio** (regex + spaCy NER) as 3-layer chained recognizer
-- **PyMuPDF** for PDF extraction
-- **PaddleOCR** for printed text OCR
-- **Transformers (TrOCR)** for handwriting
-- **Fernet (AES-128-CBC + HMAC)** for reversible vault encryption
-- **Gradio** UI + CLI
-
-## Source Tree (implemented)
-```
-pii_redact/
-  __init__.py          — package root, exports RedactionBox / DocumentType / MetadataStripResult
-  models.py            — core dataclasses: RedactionBox, DocumentResult, PageResult, etc.
-  config.py            — Pydantic settings loaded from config/settings.yaml
-  pipeline.py          — RedactionPipeline orchestrator (stub)
-  classifier.py        — document type classifier (stub)
-  cli.py               — Click CLI: redact / batch / review / vault / audit / train
-  ui.py                — Gradio 3-tab UI (stub)
-  layers/              — (empty, reserved for redaction layers)
-  ner/
-    regex_patterns.py  — 10 PatternRecognizers: SSN, NPI, EIN, ICD10, CPT, POLICY_NUM,
-                         ROUTING_NUM, ADJUSTER_ID, CLAIM_REF, DEA_NUM
-    presidio_setup.py  — singleton AnalyzerEngine builder with spaCy fallback cascade
-    insurance_ner.py   — insurance-domain spaCy NER stub
-  redact/              — (empty, reserved for redaction writers)
-  templates/           — (empty, coordinate template store)
-
-config/settings.yaml   — runtime config (thresholds, paths, entity list)
-scripts/
-  validate_datasets.py — offline dataset validator (fetches i2b2 PHI challenge data)
-  download_models.py   — model downloader
-  train_insurance_ner.py — training stub
-
-tests/
-  test_models.py         — RedactionBox / DocumentResult data contract tests
-  test_no_blur_safety.py — pixel-level redaction blur safety
-  test_redact_engine.py  — engine safety + PII-in-output guard tests
-  test_regex_patterns.py — determinism tests for all 10 regex recognizers
-  test_vault.py          — Fernet encrypt/decrypt + audit log (5 skipped: vault module pending)
-```
-
-## Test Suite Status
-
-| File | Tests | Status |
-|------|-------|--------|
-| test_models.py | ~15 | PASS |
-| test_no_blur_safety.py | ~10 | PASS |
-| test_redact_engine.py | ~30 | PASS |
-| test_regex_patterns.py | ~17 | PASS |
-| test_vault.py | 7 pass / 5 skip | PASS (isolated) |
-
-**Known issue**: Full `pytest` run segfaults on vault crypto tests (#72+) because
-`presidio_analyzer` import chain loads torch + bundled OpenSSL, which corrupts
-`cryptography`'s OpenSSL AES state.  
-**Fix applied**: `@pytest.mark.forked` on `TestCryptoRoundTrip` — but `fork()` is
-deprecated for multi-threaded Python 3.13.  
-**Current workaround**: Run vault tests separately: `pytest tests/test_vault.py`
-
-## What Works
-- [x] Full project scaffolding + pyproject.toml + Docker
-- [x] Core data models (RedactionBox, DocumentResult, etc.)
-- [x] 10 insurance-domain regex recognizers (SSN, NPI, EIN, ICD10, CPT, POLICY_NUM, ROUTING_NUM, ADJUSTER_ID, CLAIM_REF, DEA_NUM)
-- [x] Presidio AnalyzerEngine singleton builder with spaCy fallback cascade
-- [x] Click CLI skeleton (redact / batch / review / vault / audit / train)
-- [x] Gradio UI skeleton (3 tabs)
-- [x] Config system (Pydantic settings + settings.yaml)
-- [x] 84+ passing tests (85 pass, 5 skip in isolated run)
-
-## Benchmark Results
-
-### Layer 1: Regex-only baseline
-Run: `python scripts/run_benchmark.py --dataset all --max-docs 200`
-
-| Dataset | P | R | F1 | Notes |
-|---------|---|---|----|-------|
-| TAB (200 docs) | 0.000 | 0.000 | 0.000 | TAB targets PERSON/ORG/LOC — no regex match |
-| Gretel Finance (200 docs) | 0.302 | 0.126 | 0.178 | EMAIL=0.867, DATE=0.412, IPV4=1.0 |
-
-### Layer 2: Presidio NER (spaCy + regex)
-Run: `CUDA_VISIBLE_DEVICES="" python scripts/run_benchmark_nlp.py --dataset all --max-docs 100 --min-score 0.6`
-
-| Dataset | P | R | F1 | Notes |
-|---------|---|---|----|-------|
-| TAB (100 docs) | 0.025 | 0.604 | 0.049 | High FP: legal text has many non-confidential entities |
-| Gretel Finance (100 docs) | 0.163 | 0.532 | 0.251 | +41% vs regex |
-
-**Gretel NLP per-entity highlights (min_score=0.6):**
-
-| Entity | P | R | F1 |
-|--------|---|---|----|
-| IP_ADDRESS | 0.875 | 1.000 | 0.933 |
-| EMAIL_ADDRESS | 0.929 | 0.867 | 0.897 |
-| DATE_TIME | 0.522 | 0.726 | 0.607 |
-| PHONE_NUMBER | 0.312 | 0.882 | 0.462 |
-| PERSON | 0.137 | 0.401 | 0.204 |
-| ORG | 0.056 | 0.365 | 0.098 |
-
-**TAB structural problem:** Court documents contain thousands of non-confidential ORG/LOC mentions (court names, agencies) that NER cannot distinguish from confidential ones. This requires document-level context, not span-level detection.
-
-**Key gaps remaining:**
-- CREDIT_CARD: 0.0 — Presidio recognizer exists but Gretel format may not match
-- LOCATION: 0.0 — span mismatch (Gretel annotates full addresses, spaCy detects city names)
-- ORG precision very low — needs context-aware filtering
-- PERSON precision 0.137 — spaCy finds many non-PII person references
-
-## Sprint 2 Implementation Plan (parallel, May 2026)
-
-Four independent work streams running in parallel git worktrees.
-Merge order after completion: NMS → Surya → GLiNER → Docling.
-
-### S2-1: Surya OCR — replace dead PaddleOCR path
-**Owner:** agent/surya-ocr  **Branch:** feat/surya-ocr
-- Install `surya-ocr` (MIT, pip-installable, 90+ languages)
-- Replace `_run_ocr_on_image()` in `pii_redact/pipeline.py` with Surya's
-  line-level text detection + recognition
-- Surya API: `from surya.recognition import run_recognition; from surya.detection import run_detection`
-- Keep the same return type: `list[RedactionBox]`
-- Update `pyproject.toml` dependencies
-- Add `@pytest.mark.slow` unit test: OCR a synthetic text PNG, verify boxes returned
-- **Why critical:** OCR path currently silently fails. All scanned forms (majority of
-  real insurance workflows) produce zero detections.
-
-### S2-2: GLiNER-PII as Layer 4 NER
-**Owner:** agent/gliner  **Branch:** feat/gliner-pii
-- Install `gliner` (Apache 2.0)
-- New file: `pii_redact/ner/gliner_recognizer.py`
-  - Class `GLiNERRecognizer(EntityRecognizer)` (Presidio interface)
-  - Model: `nvidia/gliner-PII` (first choice) or `knowledgator/gliner-pii-large-v1`
-  - Entity prompts: `["person name", "organization employer name",
-    "social security number", "date of birth", "phone number",
-    "email address", "insurance policy number", "patient address"]`
-  - Lazy model load; CPU-capable (~400MB BERT-sized model)
-  - `invalidate_result` hook to block low-confidence spans
-- Wire into `pii_redact/ner/presidio_setup.py` (add to registry, after spaCy)
-- 34 fast unit tests minimum (mock model for fast tier; real model in slow tier)
-- Benchmark before/after on Gretel 50 docs to measure PERSON+ORG F1 delta
-- **Why high impact:** GLiNER entity prompts encode PII semantics directly
-  ("employer organization" ≠ "court agency"), far outperforming spaCy ORG class.
-
-### S2-3: Span deduplication NMS
-**Owner:** agent/nms  **Branch:** feat/span-nms
-- New function `deduplicate_boxes(boxes: list[RedactionBox]) -> list[RedactionBox]`
-  in `pii_redact/redact/engine.py`
-- Algorithm (two passes):
-  1. Text-span dedup: if two boxes have the same `text_found`, keep higher confidence;
-     break ties by entity-type specificity (SSN > PERSON > NRP)
-  2. Coordinate dedup (for image/raster boxes): IoU > 0.5 → keep higher confidence box
-- Wire into each sub-pipeline in `pii_redact/pipeline.py` after all layers merge,
-  before `_apply_pdf_redactions` / `_apply_image_redactions`
-- Entity-type specificity ranking (most specific first):
-  `US_SSN, NPI, EIN, DEA_NUM, ROUTING_NUM, POLICY_NUM, CLAIM_REF, ADJUSTER_ID,
-   CREDIT_CARD, IBAN_CODE, EMAIL_ADDRESS, PHONE_NUMBER, IP_ADDRESS,
-   DATE_TIME, PERSON, LOCATION, ORG, NRP`
-- ≥10 fast unit tests covering: exact duplicate, partial overlap, no overlap,
-  type-specificity tiebreak, coordinate IoU cases
-- **Why needed:** SSN detected by both custom SSN recognizer and Presidio US_SSN
-  creates double boxes. Audit log inflates counts. PDF gets double-thick rectangles.
-
-### S2-4: Docling layout-aware PDF parsing
-**Owner:** agent/docling  **Branch:** feat/docling-parser
-- Install `docling` (MIT, IBM Research)
-- New file: `pii_redact/layers/docling_parser.py`
-  - `extract_text_with_layout(pdf_path) -> list[LayoutSpan]`
-  - `LayoutSpan`: text, bbox, page, field_label (e.g. "Employer", "Patient Name"),
-    block_type ("form_field", "table_cell", "paragraph", "header")
-  - High-value field labels (always redact if ORG/PERSON detected): employer,
-    insured name, patient name, policy holder, claimant
-  - Low-value field labels (skip NER, context-only): insurer, court, agency name
-- Modify `_extract_pdf_text_boxes()` in `pipeline.py`: if Docling available,
-  use `extract_text_with_layout()`; else fall back to current PyMuPDF extraction
-- `is_high_value_field()` helper: returns True if field_label matches insurance PII fields
-- ≥8 fast unit tests (mock Docling, test field routing logic)
-- **Why needed:** Gives field-level context for ORG disambiguation. "GreenTech Inc."
-  in an Employer field → always redact. Same company in an Insurer field → skip.
+_Last verified: 2026-05-08, S6 report_
 
 ---
 
-## What's Next (priority order)
-1. [x] Fix full-suite segfault — excluded test_regex_patterns.py from default collection
-2. [x] Fix infinite subprocess recursion in conftest.py (_PYTEST_SUBPROCESS_WORKER sentinel)
-3. [x] Implement `pii_redact.vault` — Fernet key gen + encrypt/decrypt + VaultSession token map
-4. [x] Implement `pii_redact.audit` — SQLite write_event / read_events
-5. [x] Integrate Qwen3-VL-8B-Instruct-FP8 (GPU-first, CPU fallback) into pipeline
-6. [x] Benchmark runner (scripts/run_benchmark.py) — TAB + Gretel Finance
-7. [x] Fix label mapping (ORGANIZATION→ORG, etc.) to improve Gretel F1
-8. [x] Enable Presidio NLP layer in benchmark (run_benchmark_nlp.py) — Gretel F1 +41%
-9. [x] Download Qwen3-VL model weights:
-   - FP8 (SM≥8.9): Qwen/Qwen3-VL-8B-Instruct-FP8
-   - bfloat16 (RTX 3090 / SM 8.6): Qwen/Qwen3-VL-8B-Instruct
-10. [x] Test VLM on sample document — working on GPU (16s inference, 10/10 PII detected)
-    - Fixed: Qwen3VLForConditionalGeneration class name
-    - Fixed: system message as messages dict, not apply_chat_template kwarg
-    - Fixed: SM-aware model selection (FP8 needs SM≥8.9; RTX 3090 uses bf16 base)
-11. [x] Add label mappings: TIME→DATE_TIME, IBAN→IBAN_CODE, PASSPORT_NUMBER, DRIVER_LICENSE_NUMBER
-    - IBAN_CODE: F1=0.957 after fix
-12. [ ] Improve CREDIT_CARD detection (Presidio requires Luhn validation — Gretel uses fake nums)
-13. [ ] Improve LOCATION by routing addresses through VLM instead of spaCy (VLM detects full address)
-14. [x] Wire VLM into full pipeline — pipeline._run_visual_layer writes temp PNG, passes to VLM
-15. [x] Wire Gradio UI to actual pipeline — `pii-redact ui [--port 7860] [--vlm]` command added
-16. [x] Hourly verification agent — cron job db335ee6 (fires :13 past every hour, 7-day TTL)
-    - Runs: fast tests + Gretel NLP benchmark + git log check
-    - Baseline: Gretel F1=0.243, EMAIL=0.897, IBAN=0.957, IP=0.933
-17. [x] Improve PERSON precision via langdetect filter — PERSON P: 0.273→0.653 (+139%), F1: 0.405→0.506
-    - Filter: drop PERSON/ORG/LOCATION spans where ±100-char context is non-English
-    - Applied in benchmark runner (run_benchmark_nlp.py); production pipeline not needed (insurance docs = English)
-18. [x] End-to-end smoke test on synthetic CMS-1500 form (tests/test_smoke_claim_form.py)
-    - Generates real CMS-1500 PDF with PyMuPDF, 11 PII fields, 9 pytest assertions
-    - Verifies: PERSON, DATE_TIME, US_SSN, PHONE_NUMBER, EMAIL_ADDRESS, POLICY_NUM all detected
-    - Runs in 5s (scope=class fixture, pipeline loads once)
-19. [x] ORG structural quality filter (pii_redact/ner/entity_filters.py)
-    - Root cause: spaCy detects 124 ORGs in 20 docs, only ~25 are gold → 5:1 FP rate
-    - 5 FP categories: role words (Vendor/Client), all-caps acronyms (CMT/AI/PII), XML artifacts, lowercase spans, overlong phrases
-    - Fix: is_valid_org() blocklist + acronym regex + tech-char filter + length + context gate
-    - ORG P: 0.056→0.245 exact (+4.4x), 0.129→0.415 partial (+3.2x)
-    - Overall F1: 0.604→0.730 partial, 0.269→0.363 exact
-    - Also: is_valid_person() for form-label PERSON FPs ("Email", "Phone", "Address")
-    - 34 new fast unit tests in test_entity_filters.py; fast suite: 61→95 tests
+## Architecture (current)
 
-## Current Benchmark Baselines
+Four detection layers in sequence. Results unioned, deduplicated, rendered as solid black fills.
 
-### Gretel Finance (100 docs, Presidio NLP, min_score=0.6)
-| Metric mode | P | R | F1 | Notes |
-|-------------|---|---|----|-------|
-| Exact span | 0.163 | 0.471 | 0.242 | Strict: predicted must equal gold span exactly |
-| Partial overlap | 0.432 | 0.895 | **0.583** | Baseline (before langdetect filter) |
-| Partial overlap + langdetect | 0.489 | 0.787 | 0.604 | After PERSON/ORG language filter |
-| Partial + langdetect + entity_filters | 0.815 | 0.662 | **0.730** | After ORG structural quality filter |
+```
+Document Image / PDF
+  ├── Layer 1: Surya OCR  — line-level text + bounding boxes from scanned images
+  ├── Layer 2: Text NER   — Presidio (spaCy + 17 custom PatternRecognizers) + optional GLiNER
+  ├── Layer 3: Layout     — Docling field-label context (high-value / low-value field routing)
+  └── Layer 4: Visual     — Qwen3-VL-8B grounding (bbox_2d JSON) + face/plate/QR detection
+Post: Span NMS (text dedup + coordinate IoU) → confidence gate → solid-fill redaction
+```
 
-**Per-entity highlights (partial match, current):**
-| Entity | P | R | F1 | Delta vs original baseline |
-|--------|---|---|----|---------------------------|
-| EMAIL_ADDRESS | 1.000 | 0.933 | 0.966 | — |
-| IBAN_CODE | 1.000 | 0.917 | 0.957 | — |
-| IP_ADDRESS | 0.875 | 1.000 | 0.933 | — |
-| DATE_TIME | 0.891 | 0.895 | 0.893 | — |
-| PERSON | 0.670 | 0.420 | 0.516 | P: +145%, F1: +27% |
-| LOCATION | 0.420 | 0.349 | 0.382 | P: +65% |
-| ORG | 0.415 | 0.182 | 0.253 | P: +222%, F1: +15% |
+---
 
-### TAB (100 docs) — known hard problem
-| Layer | F1 (exact) | Notes |
-|-------|-----------|-------|
-| Presidio NLP | 0.049 | Legal docs: many non-confidential ORG/LOC entities |
+## Benchmark Results (canonical)
 
-## Known Limitations
-- CREDIT_CARD: Gretel test set has Luhn-invalid and non-English-context CCs → F1=0 in benchmark
-  - Production: detects "Credit Card Number: 4532015112830366" correctly
-- TAB precision: Court documents mention thousands of public orgs/locations → structural FP problem
-- VLM inference: ~12s per page on RTX 3090 bfloat16; model loads in ~4s (cached across docs)
+### Gretel Finance — text-layer NER path
+Run: `CUDA_VISIBLE_DEVICES="" python scripts/run_benchmark_nlp.py --dataset gretel --max-docs 100 --partial`
 
-## Test Tier Rules (CRITICAL — prevents machine OOM/kill)
-- **`pytest -m fast`** — pure Python only, no ML imports. Safe to run anytime. (<10s)
-- **`pytest -m slow`** — loads torch+spacy+paddle+presidio. CI/Docker only. Never background.
-- **Never run `pytest tests/` (unmarked full suite)** — loads all ML libraries simultaneously.
-- test_regex_patterns.py is `slow` (presidio import → spacy → torch chain)
-- test_models, test_vault, test_no_blur_safety, test_redact_engine are `fast`
+#### Partial match (primary metric for redaction compliance)
+> Partial match is correct for PII coverage: detecting "Springfield" when gold is "Springfield, IL" counts as a hit.
 
-## Attempted / Known Issues
-- **scispaCy install**: version conflicts with spaCy 3.x; skipped in favor of spaCy `en_core_web_sm`
-- **PaddleOCR**: heavy install, not yet exercised in tests (guarded by `importlib` in engine tests)
-- **pytest-forked on Python 3.13**: `fork()` in multi-threaded process causes deprecation warning and failures; subprocess spawn approach needed instead
+| Sprint | Change | Partial F1 |
+|--------|--------|-----------|
+| S0 | Regex-only baseline | 0.178 |
+| S1 | +Presidio NLP (spaCy NER) | 0.604 |
+| S2a | +ORG/PERSON entity filters (entity_filters.py) | 0.730 |
+| S2b | +Surya OCR, GLiNER, Docling, NMS (4 parallel agents) | 0.732 |
+| S3 | +CREDIT_CARD (0.65), SWIFT_BIC, US_BANK_NUMBER entities | 0.732 |
+| S4 | +PHONE_NUMBER custom recognizer (R: 0.267→0.611) | 0.738 |
+| S5 | +GLiNER benchmarked (PII_USE_GLINER=1) + phone precision fix + _validate_span | 0.772 |
+| **S6** | **+ABA checksum (US_BANK P: 0.286→1.000) + ITIN/Passport recognizers + presidio-structured + name heuristic** | **0.771** |
+
+Run command: `PII_USE_GLINER=1 CUDA_VISIBLE_DEVICES="" python scripts/run_benchmark_nlp.py --dataset gretel --max-docs 100 --partial`
+
+**Latest run (2026-05-08, partial match, S6 with GLiNER):**
+
+| Metric | Value |
+|--------|-------|
+| Precision | 0.798 |
+| Recall | 0.745 |
+| **F1** | **0.771** |
+| TP / FP / FN | ~613 / ~156 / ~210 |
+| Runtime | 1280s (100 docs, CPU GLiNER) |
+
+> S6 overall F1 ≈ flat vs S5 (within noise). US_BANK_NUMBER precision 0.286→1.000 is the headline S6 gain.
+> TransformersNlpEngine (`obi/deid_roberta_i2b2`) benchmarked but not adopted — clinical model, net F1 neutral on financial text.
+
+**Latest run without GLiNER** (faster, 7.8s): P=0.811, R=0.677, F1=0.733
+
+#### Per-entity breakdown (partial, S6 current)
+
+_With `PII_USE_GLINER=1` (canonical / best quality):_
+
+| Entity | P | R | F1 | Status |
+|--------|---|---|----|--------|
+| US_BANK_NUMBER | 1.000 | 1.000 | **1.000** | Fixed S6: ABA 3-7-1 checksum gate |
+| EMAIL_ADDRESS | 1.000 | 0.933 | **0.966** | Excellent |
+| IBAN_CODE | 1.000 | 0.917 | **0.957** | Excellent |
+| IP_ADDRESS | 0.875 | 1.000 | **0.933** | Excellent |
+| DATE_TIME | 0.891 | 0.895 | **0.893** | Excellent |
+| PHONE_NUMBER | 0.739 | 0.850 | **0.791** | Strong (S5: precision fixed) |
+| CREDIT_CARD | 0.667 | 0.667 | **0.667** | Good |
+| LOCATION | 0.564 | 0.558 | 0.561 | Via GLiNER (was 0.382) |
+| ORG | 0.556 | 0.532 | 0.543 | Via GLiNER (was 0.253) |
+| PERSON | 0.664 | 0.452 | 0.538 | Recall gap; name heuristic added for Docling path |
+| SWIFT_BIC_CODE | 0.200 | 0.500 | 0.286 | Context-gated (low base) |
+| CREDIT_CARD_SECURITY_CODE | 0.000 | 0.000 | 0.000 | No Gretel examples with context keywords |
+| US_ITIN | — | — | — | New S6 recognizer (not in Gretel dataset) |
+| US_PASSPORT | — | — | — | New S6 recognizer (not in Gretel dataset) |
+
+#### Exact match (secondary, for comparison)
+| Run | Exact F1 |
+|-----|---------|
+| Baseline (cron agent) | 0.243 |
+| S4 (2026-05-08, no GLiNER) | 0.359 (+48%) |
+| S5 (2026-05-08, GLiNER) | ~0.41 (est.) |
+| **S6 (2026-05-08, GLiNER + ABA)** | **TBD** |
+
+### SROIE / CORD — image OCR path
+Run: `python scripts/run_benchmark_sroie.py --dataset [sroie|cord] --max-docs N`
+
+| Dataset | Metric | Value | Notes |
+|---------|--------|-------|-------|
+| SROIE (word crops) | CER | **8.49%** | Surya OCR on English receipt words |
+| CORD (full receipts, NER only) | F1 | 0.18 | Indonesian receipts — expected low |
+| CORD (full receipts, VLM+NER) | F1 | **0.099** | **Confirmed stable (2 runs, same result). VLM adds 47 FP, 6 TP. Dataset mismatch: CORD = Indonesian store receipts; VLM prompted for person names/SSNs not present.** |
+
+---
+
+## Test Suite
+
+| File | Tests | Mark | Notes |
+|------|-------|------|-------|
+| test_models.py | ~15 | fast | RedactionBox / DocumentResult contracts |
+| test_no_blur_safety.py | ~10 | fast | Pixel-level fill safety |
+| test_redact_engine.py | ~30 | fast | Engine safety + PII-in-output guard |
+| test_vault.py | ~12 | fast | Fernet encrypt/decrypt + audit log |
+| test_entity_filters.py | ~34 | fast | ORG/PERSON structural quality filters |
+| test_span_nms.py | ~10 | fast | Text-span + IoU dedup |
+| test_gliner_recognizer.py | ~20 | fast | GLiNER zero-shot NER (mocked) |
+| test_surya_ocr.py | ~10 | fast | Surya OCR wrapper (mocked predictors) |
+| test_docling_parser.py | ~15 | fast | Docling layout parser (mocked) |
+| test_benchmark_sroie.py | ~30 | fast | SROIE/CORD benchmark runner (mocked) |
+| test_vlm_extractor.py | 20 | fast | VLM grounding parser (no model load) |
+| test_benchmark_vlm.py | 15 | fast | VLM+NER benchmark merge/dedup logic |
+| test_presidio_setup.py | 12 | slow | AnalyzerEngine singleton, reset, ITIN/Passport, StructuredEngine |
+| **Total fast** | **206** | | `pytest -m fast` — safe anytime, ~8s |
+| test_regex_patterns.py | ~17 | slow | Presidio import → spaCy → torch |
+| test_smoke_claim_form.py | ~11 | slow | End-to-end CMS-1500 PDF pipeline |
+
+**Test tier rules (critical — prevents OOM):**
+- `pytest -m fast` — pure Python, no ML imports. Run anytime.
+- `pytest -m slow` — loads torch+spaCy+Presidio. CI/Docker only, never background.
+- Never run `pytest tests/` unmarked — loads all ML libraries simultaneously.
+
+---
+
+## Sprint History
+
+### Sprint 0 — Scaffold
+- Project structure, pyproject.toml, Docker, core data models
+- 10 insurance-domain regex recognizers (SSN, NPI, EIN, ICD10, CPT, POLICY_NUM, ROUTING_NUM, ADJUSTER_ID, CLAIM_REF, DEA_NUM)
+- Presidio AnalyzerEngine singleton builder with spaCy fallback cascade
+- Click CLI skeleton, Gradio UI skeleton, Pydantic config
+- Fernet vault + SQLite audit log
+- Benchmark runner (scripts/run_benchmark.py) — TAB + Gretel Finance
+
+### Sprint 1 — NER baseline
+- Presidio NLP layer enabled: Gretel F1 0.178 → 0.604
+- Label normalization (ORGANIZATION→ORG, TIME→DATE_TIME, IBAN→IBAN_CODE, etc.)
+- IBAN_CODE F1=0.957 after mapping fix
+- langdetect filter: drop PERSON/ORG/LOCATION in non-English ±100-char context
+  - PERSON P: 0.273 → 0.653 (+139%)
+- ORG structural quality filter (entity_filters.py):
+  - Blocklist (role words, acronyms, XML artifacts, lowercase, overlong phrases)
+  - ORG P: 0.056 → 0.245 exact, 0.129 → 0.415 partial
+  - Overall F1: 0.604 → 0.730
+- PERSON form-label filter (is_valid_person): drops "Email", "Phone", "Address" FPs
+- End-to-end smoke test on synthetic CMS-1500 form (11 PII fields, 9 assertions)
+- Hourly verification cron job (fast tests + Gretel benchmark + git log)
+
+### Sprint 2 — OCR, GLiNER, Layout, NMS (4 parallel agents, merged)
+- **Surya OCR** (`pii_redact/layers/surya_ocr.py`): replaces dead PaddleOCR path
+  - API: DetectionPredictor + FoundationPredictor + RecognitionPredictor
+  - Lazy model loading, `[]` on any failure
+  - SROIE benchmark: CER=8.49% on English receipt words
+- **GLiNER** (`pii_redact/ner/gliner_recognizer.py`): zero-shot NER, opt-in via `PII_USE_GLINER=1`
+  - 18-entry label→entity map; model: `urchade/gliner_medium-v2.1`
+  - Registered after spaCy in Presidio registry
+- **Span NMS** (`pii_redact/redact/engine.py::deduplicate_boxes`): two-pass dedup
+  - Pass A: text-span exact dedup by (page, text_found), entity specificity ranking
+  - Pass B: coordinate IoU > 0.5 → suppress lower-confidence box
+  - Wired into all 6 sub-pipeline exit points in pipeline.py
+- **Docling layout parser** (`pii_redact/layers/docling_parser.py`)
+  - LayoutSpan dataclass with text, bbox, page, field_label, is_high_value, is_low_value
+  - Spatial heuristic: same-row span ending with ":" → field label
+  - `is_high_value_field()`: Employer/Patient → bypass ORG gate; confidence floor 0.75
+  - `is_low_value_field()`: Insurer/Payer → keep context gate
+  - Docling BOTTOMLEFT → PyMuPDF TOPLEFT coordinate conversion
+  - Falls back to PyMuPDF on parse failure
+
+### Sprint 3 — Financial entity coverage
+- **CREDIT_CARD**: base score 0.5 → 0.65 (passes min_score=0.6 without context)
+  - F1: 0 → 0.667
+- **SWIFT_BIC_CODE**: new recognizer, base score 0.40 (context-gated)
+  - 8-char and 11-char patterns; initial 0.75/0.60 caused P=0.002 FP explosion → fixed to 0.40
+  - F1: 0 → 0.286
+- **CREDIT_CARD_SECURITY_CODE (CVV)**: new recognizer, base score 0.40 (context-gated)
+  - Requires "cvv/cvc/security code" keywords; initial 0.60 fired on SSN substrings → fixed
+- **US_BANK_NUMBER**: entity type renamed from ROUTING_NUM (LABEL_MAP alignment)
+  - F1: 0 → 0.444 (R=1.000; precision limited by 9-digit pattern breadth)
+- LABEL_MAP additions in run_benchmark_nlp.py: ROUTING_NUM, CREDIT_CARD_NUMBER, SWIFT_BIC_CODE, CREDIT_CARD_SECURITY_CODE, BBAN, ACCOUNT_PIN
+
+### Sprint 6 — Presidio utilization + ABA checksum + ITIN/Passport (current)
+- **ABA routing checksum** (`pii_redact/ner/regex_patterns.py`)
+  - `_AbaRoutingRecognizer` subclass overrides `validate_result()` with 3-7-1 weighted sum
+  - US_BANK_NUMBER P: 0.286 → **1.000**, F1: 0.444 → **1.000**
+- **ITIN recognizer** — `ITIN_Recognizer` (pattern `9\d{2}-\d{2}-\d{4}`, score 0.65)
+  - Replaces built-in `UsItinRecognizer` (base 0.5 < min_confidence=0.6 — was silently suppressed)
+- **US Passport recognizer** — `Passport_Recognizer` (pattern `[A-Z]\d{8}`, score 0.65)
+  - Replaces built-in `UsPassportRecognizer` (base 0.45 < min_confidence=0.6)
+- **presidio-structured** — `build_structured_engine()` in presidio_setup.py
+  - Wraps `AnalyzerEngine` in `StructuredEngine` for pandas DataFrame PII analysis
+  - `PandasAnalysisBuilder().generate_analysis(df)` → `engine.anonymize(df, analysis, operators=...)`
+- **TransformersNlpEngine** — `PII_USE_TRANSFORMERS=1` opt-in + `.load()` fix
+  - Model: `obi/deid_roberta_i2b2` (clinical PHI, i2b2 2014 challenge)
+  - Benchmarked: F1=0.770, no gain vs spaCy+GLiNER on financial text — not adopted as default
+- **PERSON name heuristic** — `looks_like_name()` fallback in `_boxes_from_layout_spans()`
+  - Fires when NER produces no PERSON in a high-value Docling field (Patient Name, Insured, etc.)
+  - Accepts 2-60 char, letters/spaces/hyphens/periods, starts uppercase, not in field-label blocklist
+- **VLM GPU fix** — `dtype=` → `torch_dtype=`, `device_map="auto"` → `device_map={"": 0}`
+  - Root cause: wrong kwarg name caused float32 load (32 GB) → silent OOM → CPU fallback
+  - Fixed: bfloat16 explicit, single-GPU placement bypasses accelerate heuristic
+- **Test suite** — `test_presidio_setup.py` added (12 tests: singleton, reset, ITIN/Passport, StructuredEngine)
+  - Total: 197 tests passing, 9 skipped
+- **Overall S6 F1: 0.771** (≈ S5 0.772; headline gain is US_BANK_NUMBER 0.444→1.000)
+
+### Sprint 5 — GLiNER validated + PHONE_NUMBER precision
+- **GLiNER benchmarked for first time** (`PII_USE_GLINER=1`)
+  - First run revealed EMAIL regression: P 1.000→0.636 (GLiNER returning form labels like "Email:")
+  - Fix: `_validate_span()` in `gliner_recognizer.py` — format gate per entity type
+    - EMAIL_ADDRESS: requires `@` in span
+    - PHONE_NUMBER: requires ≥7 digits in span
+    - US_SSN: requires SSN pattern match
+    - NPI/EIN: requires at least one digit
+  - After fix: EMAIL restored 0.966, PHONE P lifted 0.362→0.739
+  - Net gains from GLiNER: LOCATION 0.382→0.556, ORG 0.253→0.545, PHONE F1 0.423→0.791
+  - **Overall F1: 0.738 → 0.772** (+0.034; 534.6s vs 7.8s without GLiNER)
+- **PHONE_NUMBER precision fix** (`pii_redact/ner/regex_patterns.py`)
+  - Root cause: EDI/EDIFACT field separators (`NAD+SU+9X:12+9876543210`) and SWIFT/IBAN embedded numbers
+  - FP categories: 17 international FPs (EDI `+` prefix), 8 bare 10-digit FPs (SWIFT/IBAN)
+  - US 10-digit: `(?<!\d)` → `(?<![+:\w])` (blocks after `+`, `:`, word chars)
+  - International: `(?<![a-zA-Z0-9])` before `\+` + `(?!\d|:)` lookahead
+  - **Result: PHONE_NUMBER P: 0.324→0.739** (with GLiNER)
+- **VLM grounding A/B benchmark** (CORD, CPU run in progress)
+
+### Sprint 4 — VLM grounding + PHONE_NUMBER
+- **VLM grounding mode** (`pii_redact/ner/vlm_extractor.py` rewritten)
+  - Old: pipe-delimited text output, `(x=0, y=0, w=0, h=0)` placeholder coordinates
+  - New: JSON `bbox_2d` grounding output — Qwen3-VL's native coordinate format
+  - Format: `[{"bbox_2d": [x1, y1, x2, y2], "label": "PERSON", "text": "Jane", "confidence": 0.9}]`
+  - Coords normalized 0-1000 → pixel by `(coord / 1000) * img_dim`
+  - Parser handles: markdown fences, reversed coords, out-of-bounds, JSON in prose
+  - 20 fast unit tests in `tests/test_vlm_extractor.py`
+- **VLM benchmark A/B** (`scripts/run_benchmark_sroie.py`)
+  - `--vlm` flag: routes each CORD receipt image through `run_ner_vlm()` (VLM + NER merged)
+  - `_get_vlm()` lazy loader, temp PNG lifecycle managed in `finally`
+  - `print_table()` shows `[VLM+NER]` vs `[NER]`
+  - 15 fast mocked tests in `tests/test_benchmark_vlm.py`
+  - **GPU run pending**: `python scripts/run_benchmark_sroie.py --dataset cord --max-docs 50 --vlm`
+- **PHONE_NUMBER custom recognizer** (`pii_redact/ner/regex_patterns.py`)
+  - Root cause: built-in PhoneRecognizer base 0.4 → filtered at min_score=0.6 without context
+  - US 10-digit: `(?<!\d)(?:\+1[\s.-]?)?(?:\([2-9]\d{2}\)|[2-9]\d{2})[\s.-]?[2-9]\d{2}[\s.-]?\d{4}(?!\d)` score=0.65
+  - International E.164: `\+[1-9]\d{0,2}[\s.-]?\(?\d{1,4}\)?[\s.-]?\d{2,4}...` score=0.60
+  - Removed `PhoneRecognizer` from Presidio built-ins → 14 custom recognizers total
+  - **Result: PHONE_NUMBER R: 0.267 → 0.611 (+129%), F1: 0.348 → 0.423 (+22%)**
+  - Overall partial F1: 0.732 → **0.738**
+
+---
+
+## Known Gaps (priority order)
+
+| Gap | Entity | Metric | Root cause | Difficulty |
+|-----|--------|--------|------------|------------|
+| PERSON recall | PERSON | R=0.452 | NER misses single-word names in short text; name heuristic added for Docling path only | Medium |
+| SWIFT_BIC precision | SWIFT_BIC | P=0.200 | 8-char pattern matches company abbreviations | Hard |
+| CREDIT_CARD_SECURITY_CODE | CVV | F1=0.000 | Gretel test set lacks "cvv/cvc" context keywords near 3-digit values | Low (dataset issue) |
+| VLM+NER on receipts (GPU) | image path | unknown | CPU run done (F1=0.099, degraded); GPU run in progress | Run on GPU |
+| WildReceipt benchmark | image path | unknown | 1,765 real receipt photos not yet ingested | Medium |
+| GLiNER runtime | all | 1280s vs 8s | CPU inference; acceptable for batch, slow for interactive | GPU / quantize |
+| TransformersNlpEngine | PERSON/ORG | neutral | `obi/deid_roberta_i2b2` trained on clinical PHI, not financial text; no gain on Gretel | Domain gap |
+
+---
+
+## Immediate Next Steps
+
+1. **CORD VLM conclusion** — F1=0.099 confirmed stable across 2 independent runs. VLM+NER is harmful on CORD (47 FP, 6 TP vs NER-only 0.18). Root cause: dataset mismatch — CORD = Indonesian store receipts with no personal PII. VLM GPU fix applied (`torch_dtype`, `device_map={"": 0}`); device confirmation print added to benchmark. VLM is better validated on insurance forms where personal PII is dense.
+
+2. **PERSON recall on NLP benchmark** — R=0.452. Name heuristic (`looks_like_name`) added for Docling path (high-value fields). No NLP benchmark impact since it only fires on form fields; PERSON recall on flat text still needs a better NER model for single-word names.
+
+3. **SWIFT_BIC precision** — P=0.200. 8-char pattern fires on company abbreviations. Needs BIC format gate (first 4 chars alpha, next 2 = ISO country code).
+
+4. **GLiNER runtime** — 1280s/100 docs on CPU. Consider GPU inference for interactive mode.
+
+5. **WildReceipt** — 1,765 real receipt photos. Dataset setup: `scripts/download_wildreceipt.py`.
+
+---
+
+## Infrastructure Notes
+
+- **Test tier rules (CRITICAL — prevents OOM):**
+  - `pytest -m fast` — pure Python, no ML imports. Always safe. (~8s)
+  - `pytest -m slow` — loads torch+spaCy+Presidio. CI/Docker only, never background.
+  - Never `pytest tests/` unmarked.
+
+- **Segfault isolation:** `test_regex_patterns.py` excluded from default collection (presidio import chain loads torch + bundled OpenSSL, corrupts `cryptography` AES state in same process). Use `pytest tests/test_regex_patterns.py` standalone.
+
+- **Vault tests:** Run separately (`pytest tests/test_vault.py`) due to same OpenSSL isolation issue.
+
+- **Hourly cron:** job `db335ee6`, fires :13 past every hour, 7-day TTL.
+  - Checks: fast tests + Gretel NLP benchmark (exact) + git log
+  - Regression threshold: Gretel exact F1 < 0.240
+
+- **GPU notes:**
+  - FP8 inference requires SM ≥ 8.9 (RTX 4090, H100); auto-detected
+  - RTX 3090 (SM 8.6): auto-falls back to bfloat16 base model
+  - VLM inference: ~12s/page on RTX 3090

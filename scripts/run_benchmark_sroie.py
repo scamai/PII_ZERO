@@ -125,6 +125,7 @@ def _get_ocr():
 # ---------------------------------------------------------------------------
 
 _ner_analyzer = None
+_vlm_extractor = None
 
 
 def _get_analyzer():
@@ -138,6 +139,19 @@ def _get_analyzer():
     return _ner_analyzer
 
 
+def _get_vlm():
+    """Return the VLMExtractor instance, loading Qwen3-VL-8B on first call."""
+    global _vlm_extractor
+    if _vlm_extractor is None:
+        print("[VLM] Loading VLMExtractor (Qwen3-VL-8B) …")
+        from pii_redact.ner.vlm_extractor import VLMExtractor
+        _vlm_extractor = VLMExtractor()
+        _vlm_extractor._load()
+        device = getattr(_vlm_extractor, "_device", "unknown")
+        print(f"[VLM] VLMExtractor ready. device={device}")
+    return _vlm_extractor
+
+
 def run_ner(text: str, min_score: float = 0.5) -> list[str]:
     """Return list of detected span strings."""
     analyzer = _get_analyzer()
@@ -147,6 +161,52 @@ def run_ner(text: str, min_score: float = 0.5) -> list[str]:
         logger.warning("Presidio error: %s", exc)
         return []
     return [text[r.start:r.end] for r in results if r.score >= min_score]
+
+
+def run_ner_vlm(
+    pil_image,
+    ocr_text: str,
+    min_score: float = 0.5,
+    tmp_dir: Path | None = None,
+) -> list[str]:
+    """Run VLMExtractor + Presidio NER, merge results, dedup by text value.
+
+    VLM spans are listed first (visual detection takes priority over OCR-text NER).
+    Deduplication is case-insensitive so "TOTAL 99.00" and "total 99.00" count once.
+    Temp PNG is cleaned up even if the VLM call raises.
+    """
+    import tempfile
+
+    tmp_dir = tmp_dir or Path(tempfile.gettempdir())
+    tmp_path = tmp_dir / f"_vlm_tmp_{os.getpid()}.png"
+
+    try:
+        pil_image.save(str(tmp_path), format="PNG")
+
+        extractor = _get_vlm()
+        try:
+            vlm_boxes = extractor.extract(str(tmp_path), page=0)
+        except Exception as exc:
+            logger.warning("VLMExtractor.extract failed: %s", exc)
+            vlm_boxes = []
+
+        vlm_spans = [b.text_found for b in vlm_boxes if b.text_found.strip()]
+        ner_spans = run_ner(ocr_text, min_score=min_score)
+
+        seen: set[str] = set()
+        merged: list[str] = []
+        for span in vlm_spans + ner_spans:
+            key = span.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                merged.append(span)
+        return merged
+
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +385,7 @@ def run_cord(
     min_score: float = 0.5,
     partial: bool = True,
     save_cache: bool = True,
+    use_vlm: bool = False,
 ) -> dict:
     """Benchmark OCR + NER on CORD full-receipt images.
 
@@ -409,8 +470,11 @@ def run_cord(
             ln["text"] for ln in ocr_lines if ln["text"].strip()
         )
 
-        # NER on OCR'd text
-        pred_spans = run_ner(full_text, min_score=min_score)
+        # NER on OCR'd text (+ VLM grounding if enabled)
+        if use_vlm:
+            pred_spans = run_ner_vlm(pil_img, full_text, min_score=min_score, tmp_dir=data_dir)
+        else:
+            pred_spans = run_ner(full_text, min_score=min_score)
 
         # Accumulate metrics
         gold_texts = [v for _, v in gold_entities]
@@ -452,6 +516,7 @@ def run_cord(
         "ocr_errors": ocr_errors,
         "avg_ocr_lines": round(avg_lines, 1),
         "match_mode": mode,
+        "vlm_mode": use_vlm,
         "overall": overall,
         "per_entity": per_entity,
     }
@@ -464,9 +529,11 @@ def run_cord(
 
 def print_table(results: dict) -> None:
     name = results.get("dataset", "?")
+    vlm_mode = results.get("vlm_mode", False)
+    mode_label = "  [VLM+NER]" if vlm_mode else "  [NER]" if "overall" in results else ""
     sep = "=" * 64
     print(f"\n{sep}")
-    print(f"  {name}")
+    print(f"  {name}{mode_label}")
     print(sep)
 
     if "error" in results:
@@ -569,6 +636,16 @@ def main() -> None:
         action="store_true",
         help="Do not save dataset to disk cache",
     )
+    parser.add_argument(
+        "--vlm",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable VLM-augmented NER on receipt images (CORD only). "
+            "Requires Qwen3-VL-8B weights. Adds VLMExtractor grounding results "
+            "to Presidio NER spans for A/B comparison."
+        ),
+    )
     args = parser.parse_args()
 
     data_root = Path(args.data_dir)
@@ -589,12 +666,15 @@ def main() -> None:
         all_results.append(r)
 
     if args.dataset in ("cord", "all"):
+        if args.vlm:
+            os.environ["PII_USE_VLM"] = "1"
         r = run_cord(
             data_root,
             max_docs=args.max_docs,
             min_score=args.min_score,
             partial=args.partial,
             save_cache=save_cache,
+            use_vlm=args.vlm,
         )
         print_table(r)
         all_results.append(r)

@@ -132,6 +132,9 @@ _PERSON_SINGLE_WORD_BLOCKLIST: frozenset[str] = frozenset({
 })
 
 
+_NAME_RE = re.compile(r"^[A-Za-z\s\-\.\']+$")
+
+
 def is_valid_person(span: str) -> bool:
     """Return True if *span* is a plausible person name (not a label FP)."""
     if not span or not span.strip():
@@ -143,5 +146,25 @@ def is_valid_person(span: str) -> bool:
         return False
     # Starts with lowercase → not a proper name
     if span[0].islower():
+        return False
+    return True
+
+
+def looks_like_name(text: str) -> bool:
+    """Heuristic: does *text* look like a person name suitable for a named field?
+
+    Used as a fallback when NER produces no PERSON detection in a high-value
+    field (e.g., 'Patient Name: John'). Returns True for 2–60 char strings
+    composed only of letters/spaces/hyphens/periods/apostrophes that start
+    with an uppercase letter and are not a known field label.
+    """
+    text = text.strip()
+    if not text or len(text) < 2 or len(text) > 60:
+        return False
+    if not text[0].isupper():
+        return False
+    if not _NAME_RE.match(text):
+        return False
+    if text.lower() in _PERSON_SINGLE_WORD_BLOCKLIST:
         return False
     return True

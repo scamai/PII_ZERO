@@ -60,6 +60,7 @@ def recognizers():
             _adjuster_id_recognizer,
             _claim_ref_recognizer,
             _dea_recognizer,
+            _phone_recognizer,
             PRESIDIO_RECOGNIZER_LIST,
         )
         return {
@@ -73,6 +74,7 @@ def recognizers():
             "adjuster": _adjuster_id_recognizer,
             "claim_ref": _claim_ref_recognizer,
             "dea": _dea_recognizer,
+            "phone": _phone_recognizer,
             "all": PRESIDIO_RECOGNIZER_LIST,
         }
     except ImportError as e:
@@ -430,6 +432,51 @@ class TestDEAPattern:
 
 
 # ---------------------------------------------------------------------------
+# Phone Number
+# ---------------------------------------------------------------------------
+
+
+class TestPhoneNumberPattern:
+    US_FORMATS = [
+        "(800) 555-1234",
+        "800-555-1234",
+        "800.555.1234",
+        "+1 800 555 1234",
+        "+1-800-555-1234",
+        "phone: (312) 867-5309",
+    ]
+    INTERNATIONAL_FORMATS = [
+        "+44 20 7946 0958",
+        "+49-30-12345678",
+        "+33 1 42 86 83 26",
+    ]
+    TRUE_NEGATIVES = [
+        "12345",       # 5 digits — too short
+        "000-000-0000",  # invalid area code (000)
+    ]
+
+    def test_us_formats_match(self, recognizers):
+        r = recognizers["phone"]
+        for text in self.US_FORMATS:
+            assert _any_pattern_matches(r, text), (
+                f"Phone pattern failed to match US format: {text!r}"
+            )
+
+    def test_international_formats_match(self, recognizers):
+        r = recognizers["phone"]
+        for text in self.INTERNATIONAL_FORMATS:
+            assert _any_pattern_matches(r, text), (
+                f"Phone pattern failed to match international format: {text!r}"
+            )
+
+    def test_us_pattern_rejects_too_short(self, recognizers):
+        r = recognizers["phone"]
+        us_pattern = next(p.regex for p in r.patterns if "us_10digit" in p.name)
+        import re
+        assert not re.search(us_pattern, "12345"), "US phone pattern matched a 5-digit number"
+
+
+# ---------------------------------------------------------------------------
 # Exported list completeness
 # ---------------------------------------------------------------------------
 
@@ -439,6 +486,7 @@ class TestRecognizerListCompleteness:
         "SSN", "NPI", "EIN", "ICD10_CODE", "CPT_CODE",
         "POLICY_NUM", "US_BANK_NUMBER", "ADJUSTER_ID", "CLAIM_REF", "DEA_NUM",
         "CREDIT_CARD", "SWIFT_BIC_CODE", "CREDIT_CARD_SECURITY_CODE",
+        "PHONE_NUMBER",
     }
 
     def test_all_expected_entities_in_list(self, recognizers):

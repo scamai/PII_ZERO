@@ -160,7 +160,7 @@ def _boxes_from_layout_spans(
     - Otherwise: use normal NER confidence
     """
     from pii_redact.layers.docling_parser import is_high_value_field, is_low_value_field
-    from pii_redact.ner.entity_filters import is_valid_org, is_valid_person
+    from pii_redact.ner.entity_filters import is_valid_org, is_valid_person, looks_like_name
     from pii_redact.ner.presidio_setup import build_analyzer_engine as get_analyzer
 
     analyzer = get_analyzer()
@@ -180,6 +180,8 @@ def _boxes_from_layout_spans(
             hits = analyzer.analyze(text=text, language="en")
         except Exception:
             hits = []
+
+        detected_types = {hit.entity_type for hit in hits}
 
         for hit in hits:
             entity_type = hit.entity_type
@@ -219,6 +221,24 @@ def _boxes_from_layout_spans(
                     source="presidio_docling",
                     page=span.page,
                     text_found=span_text,
+                )
+            )
+
+        # Heuristic fallback: high-value name fields where NER produced no PERSON.
+        # Covers short names that spaCy scores below threshold on isolated text.
+        if high_value and "PERSON" not in detected_types and not low_value and looks_like_name(text):
+            logger.debug("Name heuristic fired for '%s' in field '%s'", text, field_label)
+            boxes_by_page.setdefault(span.page, []).append(
+                RedactionBox(
+                    x=span.x,
+                    y=span.y,
+                    w=span.w,
+                    h=span.h,
+                    entity_type="PERSON",
+                    confidence=0.75,
+                    source="heuristic_name_field",
+                    page=span.page,
+                    text_found=text,
                 )
             )
 

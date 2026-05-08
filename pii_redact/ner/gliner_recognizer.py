@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 from presidio_analyzer import EntityRecognizer, RecognizerResult
@@ -32,6 +33,32 @@ GLINER_LABEL_TO_ENTITY: dict[str, str] = {
 
 # Entity prompts we ask GLiNER at inference time
 GLINER_ENTITY_PROMPTS: list[str] = list(GLINER_LABEL_TO_ENTITY.keys())
+
+
+_DIGIT_RE = re.compile(r"\d")
+_EMAIL_RE = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
+_SSN_RE = re.compile(r"\d{3}[-\s]?\d{2}[-\s]?\d{4}")
+
+
+def _validate_span(span: str, entity_type: str) -> bool:
+    """Return False to discard GLiNER hits that fail format sanity checks.
+
+    GLiNER sometimes returns form-label text ("Email:", "Phone") or surrounding
+    context instead of the actual value. These guards prevent high-FP entity types
+    from degrading precision.
+    """
+    span = span.strip()
+    if not span:
+        return False
+    if entity_type == "EMAIL_ADDRESS":
+        return bool(_EMAIL_RE.search(span))
+    if entity_type == "PHONE_NUMBER":
+        return bool(_DIGIT_RE.search(span)) and len(re.sub(r"\D", "", span)) >= 7
+    if entity_type == "US_SSN":
+        return bool(_SSN_RE.search(span))
+    if entity_type in ("NPI", "EIN"):
+        return bool(_DIGIT_RE.search(span))
+    return True
 
 
 class GLiNERRecognizer(EntityRecognizer):
@@ -96,6 +123,9 @@ class GLiNERRecognizer(EntityRecognizer):
             if presidio_type is None:
                 continue
             if entities and presidio_type not in entities:
+                continue
+            span = text[hit["start"]:hit["end"]]
+            if not _validate_span(span, presidio_type):
                 continue
             results.append(
                 RecognizerResult(

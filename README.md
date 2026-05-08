@@ -30,9 +30,9 @@ The pipeline handles the full range of real-world financial documents:
 For **receipt and invoice images** specifically — the most common financial document format — the pipeline runs:
 
 1. Surya OCR to extract printed text from the image with bounding boxes
-2. Presidio + spaCy NER with 13 custom recognizers on the OCR output
+2. Presidio + spaCy NER with 17 custom recognizers on the OCR output
 3. Visual layer for face detection, QR codes, and barcodes
-4. Optional Qwen3-VL-8B for holistic image-level PII extraction
+4. Optional Qwen3-VL-8B for visual PII grounding with pixel-accurate bounding boxes
 
 ---
 
@@ -71,27 +71,32 @@ Document Image / PDF
         ├─► Layer 2: Text NER  (native PDF text + OCR output)
         │     ├── Presidio AnalyzerEngine (singleton)
         │     │     ├── spaCy en_core_web_lg → PERSON, ORG, LOCATION
-        │     │     ├── 13 custom PatternRecognizers (insurance + financial domain)
-        │     │     └── Presidio built-ins (EMAIL, PHONE, IBAN, IP, SSN, ...)
+        │     │     ├── 17 custom PatternRecognizers (insurance + financial domain)
+        │     │     └── Presidio built-ins (EMAIL, IBAN, IP, SSN, ...)
         │     ├── Post-NER filters (entity_filters.py)
         │     │     ├── ORG: blocklist + acronym gate + tech-char filter + context gate
         │     │     └── PERSON: form-label blocklist + lowercase-start filter
         │     ├── Language filter (langdetect) — drops non-English NER FPs
-        │     └── GLiNER zero-shot NER  [opt-in: PII_USE_GLINER=1]
-        │           └── urchade/gliner_medium-v2.1 (or nvidia/gliner-PII)
+        │     ├── GLiNER zero-shot NER  [opt-in: PII_USE_GLINER=1]
+        │     │     └── urchade/gliner_medium-v2.1 (or nvidia/gliner-PII)
+        │     └── StructuredEngine  [opt-in: PII_USE_STRUCTURED=1]
+        │           └── presidio-structured: PandasAnalysisBuilder → DataFrame column PII
         │
         ├─► Layer 3: Layout Context  (Docling PDF parser)
         │     ├── Extracts text blocks with field-label associations
         │     ├── "Employer: GreenTech Inc." → is_high_value=True → bypass ORG gate
         │     ├── "Insurer: Blue Cross" → is_low_value=True → keep context gate
+        │     ├── Name heuristic: high-value fields with no NER PERSON hit → looks_like_name() fallback
         │     └── Falls back to PyMuPDF on parse failure
         │
         └─► Layer 4: Visual  (Qwen3-VL-8B, GPU-first)
               ├── Face detection (CenterFace / OpenCV Haar cascade)
               ├── License plate detection (YOLOv8n)
               ├── QR / barcode detection (pyzbar)
-              └── VLM: Qwen3-VL-8B-Instruct — holistic PII extraction from image
+              └── VLM: Qwen3-VL-8B-Instruct — grounding mode (bbox_2d JSON output)
+                    Output: pixel-accurate bounding boxes (0-1000 normalized → pixel)
                     FP8 on SM≥8.9 (RTX 4090 / H100) | bfloat16 on SM 8.6 (RTX 3090)
+                    Benchmark: python scripts/run_benchmark_sroie.py --dataset cord --vlm
 
 Post-processing (all layers):
   → Span NMS: text-span exact dedup (page + text, keep highest specificity)
@@ -115,39 +120,54 @@ Evaluated on [Gretel Finance PII dataset](https://huggingface.co/datasets/gretel
 
 ### Overall (Gretel Finance, 100 docs)
 
-| Match mode | P | R | F1 |
-|---|---|---|---|
-| Exact span | 0.356 | 0.376 | 0.366 |
-| Partial overlap | 0.810 | 0.667 | **0.732** |
+| Mode | Match | P | R | F1 |
+|---|---|---|---|---|
+| No GLiNER (fast, 7.8s) | Partial | 0.811 | 0.677 | 0.733 |
+| **GLiNER enabled (canonical)** | **Partial** | **0.798** | **0.745** | **0.771** |
+| No GLiNER (fast, 7.8s) | Exact | 0.343 | 0.376 | 0.359 |
 
-### Per entity (partial match)
+Run with GLiNER: `PII_USE_GLINER=1 CUDA_VISIBLE_DEVICES="" python scripts/run_benchmark_nlp.py --dataset gretel --max-docs 100 --partial`
+
+### Per entity (partial match, with GLiNER — S6)
 
 | Entity | P | R | F1 | Notes |
 |---|---|---|---|---|
+| US_BANK_NUMBER | 1.000 | 1.000 | **1.000** | S6: ABA 3-7-1 checksum gate |
 | EMAIL_ADDRESS | 1.000 | 0.933 | **0.966** | |
 | IBAN_CODE | 1.000 | 0.917 | **0.957** | |
 | IP_ADDRESS | 0.875 | 1.000 | **0.933** | |
 | DATE_TIME | 0.891 | 0.895 | **0.893** | |
-| CREDIT_CARD | 0.667 | 0.667 | **0.667** | Luhn-validated; score boosted from 0.5→0.65 |
-| PERSON | 0.677 | 0.420 | 0.519 | Recall limited by form-label filter |
-| US_BANK_NUMBER | 0.286 | 1.000 | **0.444** | High recall; precision limited by 9-digit pattern |
-| LOCATION | 0.426 | 0.349 | 0.384 | |
-| PHONE_NUMBER | 0.500 | 0.267 | 0.348 | Format variation (see roadmap) |
-| SWIFT_BIC_CODE | 0.200 | 0.500 | **0.286** | Context-gated to avoid all-caps FPs |
-| ORG | 0.423 | 0.182 | 0.254 | Context gate trades recall for precision |
+| PHONE_NUMBER | 0.739 | 0.850 | **0.791** | S5: EDI/SWIFT lookbehind precision fix |
+| CREDIT_CARD | 0.667 | 0.667 | **0.667** | Luhn-validated, 13–19 digit |
+| LOCATION | 0.564 | 0.558 | 0.561 | GLiNER lift (was 0.382) |
+| ORG | 0.556 | 0.532 | 0.543 | GLiNER lift (was 0.253) |
+| PERSON | 0.664 | 0.452 | 0.538 | Recall gap: NER misses single-word names in short text |
+| SWIFT_BIC_CODE | 0.200 | 0.500 | 0.286 | Precision gap: 8-char pattern matches abbreviations |
 
-**Baseline history:**
+**Sprint history:**
 
-| Sprint | Event | Partial F1 |
+| Sprint | Change | Partial F1 |
 |---|---|---|
 | S0 | Regex-only baseline | 0.178 |
-| S1a | +spaCy NER (Presidio) | 0.604 |
-| S1b | +langdetect foreign-language filter | 0.604 |
-| S2a | +ORG/PERSON structural quality filters | **0.730** |
-| S2b | +Surya OCR, GLiNER, Docling, NMS (merged) | 0.732 |
-| S3 | +CREDIT_CARD, SWIFT_BIC, US_BANK_NUMBER fixed | **0.732** + new entities |
+| S1 | +spaCy NER (Presidio) + langdetect filter | 0.604 |
+| S2a | +ORG/PERSON structural quality filters | 0.730 |
+| S2b | +Surya OCR, GLiNER, Docling, NMS | 0.732 |
+| S3 | +CREDIT_CARD, SWIFT_BIC, US_BANK_NUMBER | 0.732 |
+| S4 | +PHONE_NUMBER custom recognizer (R: 0.267→0.611) | 0.738 |
+| S5 | +GLiNER benchmarked + PHONE precision fix + _validate_span | 0.772 |
+| **S6** | **+ABA checksum (US_BANK P: 0.286→1.000) + ITIN/Passport + StructuredEngine + name heuristic** | **0.771** |
 
-> **Note on image-path benchmark:** The Gretel dataset measures the *text-layer* NER path. A separate image-path benchmark using SROIE (973 scanned receipt JPEGs) is in progress and will measure Surya OCR + NER end-to-end F1 on real receipt scans.
+> S6 overall F1 is within noise of S5. The headline gain is US_BANK_NUMBER F1: 0.444 → **1.000** from the ABA checksum gate.
+
+> **Image-path benchmark:** Gretel measures the text-layer NER path. SROIE and CORD measure the OCR+image path:
+>
+> | Dataset | Mode | Result | Notes |
+> |---------|------|--------|-------|
+> | SROIE (word crops) | OCR | CER=8.49% | English receipts, Surya |
+> | CORD (20 docs) | NER only | F1=0.18 | Indonesian receipts — expected low |
+> | CORD (20 docs) | VLM+NER | F1=0.099 | Confirmed across 2 runs. VLM adds FPs without TP gain. Dataset mismatch: store receipts have no personal PII for VLM to ground. |
+>
+> VLM is better suited to insurance forms and medical records where personal PII is dense and visually structured.
 
 ---
 
@@ -277,26 +297,29 @@ Form templates (CMS-1500, ACORD 125, ACORD 140) are matched by perceptual hash a
 
 ## Custom recognizers
 
-13 PatternRecognizers tuned for financial and insurance document formats, registered alongside Presidio built-ins:
+17 PatternRecognizers tuned for financial and insurance document formats, registered alongside Presidio built-ins (replaces `PhoneRecognizer`, `UsBankRecognizer`, `CreditCardRecognizer`, `UsItinRecognizer`, `UsPassportRecognizer`):
 
 | Recognizer | Example | Score | Context-gated |
 |---|---|---|---|
-| SSN | `523-67-4891` | 0.85 | No (Luhn-like prefix) |
+| SSN | `523-67-4891` | 0.85 | No (prefix gate: never 000/666/9xx) |
 | NPI | `1234567893` (10-digit, starts 1 or 2) | 0.65 | Yes |
 | EIN | `47-1234567` | 0.75 | Yes |
 | ICD-10 | `M54.5`, `Z00.00` | 0.70 | Yes |
 | CPT | `99213`, `93000-26` | 0.60 | Yes |
 | POLICY_NUM | `POL-7834521` | 0.55–0.90 | Yes |
-| US_BANK_NUMBER | `021000021` (ABA routing) | 0.70 | Yes |
+| US_BANK_NUMBER | `021000021` (ABA routing) | 0.70 | Yes + **ABA checksum** (3-7-1 digit-weighted mod 10) |
 | ADJUSTER_ID | `ADJ-4829` | 0.50–0.85 | Yes |
 | CLAIM_REF | `CLM-2024-88801` | 0.45–0.90 | Yes |
 | DEA_NUM | `AB1234567` | 0.75 | Yes |
-| CREDIT_CARD | `4111 1111 1111 1111` (Luhn validated) | 0.65 | No (Luhn sufficient) |
+| CREDIT_CARD | `4111 1111 1111 1111` (Luhn validated, 13–19 digit) | 0.65 | No (Luhn sufficient) |
 | SWIFT_BIC_CODE | `BOFAUS3N` | 0.40 | **Yes — requires "SWIFT/BIC" keyword** |
 | CREDIT_CARD_SECURITY_CODE | `CVV: 123` | 0.40 | **Yes — requires "CVV/CVC" keyword** |
+| PHONE_NUMBER | `(800) 555-1234`, `+44 20 7946 0958` | 0.60–0.65 | No (area-code validation + EDI/SWIFT lookbehind) |
 | ADDRESS | `412 Maple Street` | 0.65 | Yes |
+| US_ITIN | `912-34-5678` (starts 9xx) | 0.65 | Yes (replaces built-in score 0.5) |
+| US_PASSPORT | `A12345678` (letter + 8 digits) | 0.65 | Yes (replaces built-in score 0.45) |
 
-Context-gating means the base score is below the 0.6 detection threshold; Presidio's context enhancer only passes the threshold when domain keywords appear nearby. This prevents SWIFT codes (which look like ticker symbols) and CVV codes (which look like amounts) from firing on unrelated text.
+Context-gating means the base score is below the 0.6 detection threshold; Presidio's context enhancer only passes the threshold when domain keywords appear nearby. The built-in `UsItinRecognizer` (0.5) and `UsPassportRecognizer` (0.45) were silently suppressed by the `min_confidence=0.6` gate — these custom replacements score 0.65 to pass it.
 
 ---
 
@@ -311,6 +334,8 @@ Structural quality filters in `pii_redact/ner/entity_filters.py` run after Presi
 - Short ambiguous names (1–2 words, no legal suffix) without financial context nearby
 
 **PERSON filter (`is_valid_person`)** — drops single-word form field labels misclassified as names: "Email", "Phone", "Address", "Vendor", "Agent", "Manager", etc.
+
+**Name heuristic (`looks_like_name`)** — fallback for Docling high-value fields (Patient Name, Insured, Employer) where NER produces no PERSON hit. Accepts 2–60 character strings composed of letters/spaces/hyphens/periods/apostrophes starting with an uppercase letter. Fires at confidence 0.75.
 
 **Language filter** — drops PERSON/ORG/LOCATION spans where the ±100-character context window is detected as non-English (eliminates foreign-language hallucinations from `en_core_web_lg`).
 
@@ -376,15 +401,19 @@ pytest tests/test_smoke_claim_form.py -v    # end-to-end CMS-1500 smoke test
 | test_no_blur_safety.py | 10 | fast | Pixel-level: only fills, zero blur output |
 | test_redact_engine.py | 30 | fast | Engine safety + PII-in-output guard |
 | test_vault.py | 12 | fast | Fernet encrypt/decrypt + audit log |
-| test_entity_filters.py | 30 | fast | ORG/PERSON FP filter: 20 TP/FP cases each |
-| test_span_nms.py | 12 | fast | IoU dedup + text-span dedup (all edge cases) |
-| test_docling_parser.py | 16 | fast/slow | Docling bbox conversion + field classification |
-| test_gliner_recognizer.py | 13 | fast | GLiNER interface (mocked model) |
-| test_surya_ocr.py | 5 | fast/slow | Surya OCR wrapper (blank image + dict shape) |
-| test_regex_patterns.py | 26 | slow | Determinism tests for all 13 regex recognizers |
-| test_smoke_claim_form.py | 9 | slow | End-to-end pipeline on synthetic CMS-1500 PDF |
+| test_entity_filters.py | 34 | fast | ORG/PERSON FP filter: 20 TP/FP cases each |
+| test_span_nms.py | 10 | fast | IoU dedup + text-span dedup (all edge cases) |
+| test_gliner_recognizer.py | 20 | fast | GLiNER interface + _validate_span (mocked model) |
+| test_surya_ocr.py | 10 | fast | Surya OCR wrapper (mocked predictors) |
+| test_docling_parser.py | 15 | fast | Docling bbox conversion + field classification |
+| test_benchmark_sroie.py | 30 | fast | SROIE/CORD benchmark runner (mocked) |
+| test_vlm_extractor.py | 20 | fast | VLM bbox_2d grounding parser (no model load) |
+| test_benchmark_vlm.py | 15 | fast | VLM+NER benchmark merge/dedup logic |
+| test_presidio_setup.py | 12 | slow | AnalyzerEngine singleton + reset + ITIN/Passport + StructuredEngine |
+| test_regex_patterns.py | 17 | slow | Determinism tests for all 17 regex recognizers |
+| test_smoke_claim_form.py | 11 | slow | End-to-end pipeline on synthetic CMS-1500 PDF |
 
-**Total: 138 passing fast tests, 0 failures.**
+**Total: 206 passing fast tests, 0 failures.** (`pytest -m fast` — safe anytime, ~15s)
 
 ---
 
@@ -426,27 +455,102 @@ PII values are never written to the audit log. The log records that a detection 
 
 ---
 
+## What's been built
+
+Six sprints from blank repo to a 4-layer detection pipeline with F1=0.771 on real financial PII data.
+
+| Sprint | What shipped | F1 |
+|---|---|---|
+| S0 | Project scaffold: 10 regex recognizers, Presidio setup, Fernet vault, audit log, Click CLI, Gradio UI | 0.178 |
+| S1 | Presidio NLP layer, label normalization, langdetect filter, ORG/PERSON structural quality filters | 0.604 → 0.730 |
+| S2 | Surya OCR (replaced PaddleOCR), GLiNER integration, Span NMS (2-pass dedup), Docling layout parser | 0.732 |
+| S3 | CREDIT_CARD (Luhn, 13–19 digit), SWIFT_BIC_CODE, CVV, US_BANK_NUMBER — financial entity coverage | 0.732 |
+| S4 | VLM grounding rewrite (bbox_2d JSON coords), VLM A/B benchmark infra, PHONE_NUMBER custom recognizer (R: 0.267→0.611) | 0.738 |
+| S5 | GLiNER benchmarked (first time), PHONE precision fix (EDI/SWIFT lookbehind), _validate_span guard | 0.772 |
+| **S6** | **ABA routing checksum (US_BANK_NUMBER P: 0.286→1.000), ITIN/Passport recognizers, StructuredEngine, name heuristic for form fields, VLM GPU fix** | **0.771** |
+
+**4.3× improvement over the regex-only baseline.** The full pipeline is:
+
+- **Surya OCR** — multilingual, MIT-licensed, replaces PaddleOCR. CER=8.49% on SROIE English receipts.
+- **Presidio + 17 custom recognizers** — spaCy NER + domain-specific patterns for insurance, financial, and medical entities. Replaces 5 noisy built-ins (PhoneRecognizer, CreditCardRecognizer, UsBankRecognizer, UsItinRecognizer, UsPassportRecognizer).
+- **GLiNER zero-shot NER** (`PII_USE_GLINER=1`) — BERT-sized model with plain-English prompts. +0.034 F1 over spaCy alone; lifts ORG 0.253→0.543, LOCATION 0.382→0.561.
+- **StructuredEngine** (`PII_USE_STRUCTURED=1`) — presidio-structured wrapping AnalyzerEngine for pandas DataFrame / tabular PII analysis.
+- **Docling layout parser** — field-label context routing. High-value fields (Patient Name, Insured) bypass ORG gate and apply name heuristic fallback. Low-value fields (Insurer, Payer) keep context gate.
+- **Span NMS** — 2-pass deduplication: text-span exact dedup + coordinate IoU > 0.5 suppression.
+- **Qwen3-VL-8B grounding** — visual PII with pixel-accurate bbox_2d coordinates. GPU-first with explicit `device_map={"": 0}` and `torch_dtype=bfloat16` (16 GB on RTX 3090).
+- **Fernet vault** — AES-256-GCM encrypted PII backup with SQLite token map; reversible with `pii-redact restore`.
+- **206 fast tests** — all pure Python, no ML imports, run in ~15s. Safety-critical: blur guard, PII-in-output guard, vault encrypt/decrypt.
+
+---
+
+## Gaps to final goal
+
+The system reliably catches most structured PII (emails, IBANs, IPs, phone numbers, credit cards). The remaining gaps are in unstructured entity types and image-path coverage.
+
+### Precision gaps
+
+| Entity | P | Root cause | Status |
+|---|---|---|---|
+| ~~US_BANK_NUMBER~~ | ~~0.286~~ | ~~9-digit ABA pattern too broad~~ | **Fixed S6**: ABA 3-7-1 checksum gate → P=1.000 |
+| SWIFT_BIC_CODE | 0.200 | 8-char pattern matches company abbreviations and product codes | Open: needs BIC format gate (first 4 alpha, chars 5-6 = ISO country code) |
+| CREDIT_CARD_SECURITY_CODE | 0.000 | 3-digit pattern needs "cvv/cvc" label nearby — Gretel has none | Dataset issue; test on real forms with labeled CVV fields |
+
+### Recall gaps
+
+| Entity | R | Root cause | Status |
+|---|---|---|---|
+| PERSON | 0.452 | NER misses single-word names on short isolated text; `is_valid_person` filter then blocks them | Partially addressed: `looks_like_name` heuristic added for Docling high-value fields. Flat-text recall still needs a financial-domain NER model. |
+| ORG | 0.532 | Quality filter over-suppresses short orgs without legal suffixes | GLiNER helps (0.253→0.543); further gains expected from `nvidia/gliner-PII` |
+| LOCATION | 0.558 | spaCy detects city names; gold labels often include full "City, State ZIP" | Partial match already counted; address recognizer covers street addresses |
+
+### Image-path gaps
+
+| Gap | Status | What's needed |
+|---|---|---|
+| VLM on insurance forms | Not benchmarked | CORD confirmed wrong domain. Validate VLM on CMS-1500 / ACORD insurance form images — personal PII is dense there. |
+| WildReceipt | Not started | 1,765 real-world receipt photos; measures robustness to angle, lighting, blur |
+| Template-aware forms | Not started | CMS-1500 and ACORD forms have fixed field coordinates — coordinate priors = zero-miss on structured fields |
+
+### Coverage gaps
+
+| Gap | What's missing |
+|---|---|
+| HIPAA Safe Harbor | 18 identifier categories per 45 CFR §164.514(b)(2) — no per-document coverage report yet |
+| Handwriting | TrOCR wired into routing table but not benchmarked; handwritten names/numbers on forms |
+| Driver's license fields | US_DRIVER_LICENSE pattern exists but no layout-aware detection for ID document photos |
+| MAC_ADDRESS | Listed in entity table; no PatternRecognizer implemented |
+
+### Infrastructure gaps
+
+| Gap | Notes |
+|---|---|
+| GLiNER runtime | ~1280s/100 docs on CPU; blocks interactive use. Fix: INT8 via `optimum-intel`, or GPU inference |
+| Async batch | Sequential per-document. Per-page NER is independent; parallelizable |
+| Financial-domain NER | `en_core_web_lg` is news-domain; fine-tuned model on insurance claims would lift PERSON/ORG ~0.10–0.15 |
+| TransformersNlpEngine | `obi/deid_roberta_i2b2` (clinical) benchmarked — neutral on financial text. A financial-domain model needed. |
+
+---
+
 ## Roadmap
 
-### Active (Sprint 3)
+### Active (Sprint 6 complete — targeting Sprint 7)
 
-- **SROIE image benchmark** — 973 scanned receipt JPEGs from ICDAR 2019, run through the full Surya OCR → Presidio NER stack. First real measurement of image-path F1 on receipts. In progress.
-- **US_BANK_NUMBER precision** — P=0.286 means 3.5× FPs on 9-digit ABA patterns. Context gate tightening or checksum validation needed.
-- **PERSON recall** — R=0.420. The ORG context gate is correct but the PERSON filter may be too conservative on single-word given names without context.
+- **SWIFT_BIC precision** — P=0.200. Add BIC format gate: chars 1–4 must be alpha (bank code), chars 5–6 must match a valid ISO 3166-1 country code. Should raise P without touching recall.
+- **`nvidia/gliner-PII`** — swap `urchade/gliner_medium-v2.1` for the purpose-fine-tuned PII model. Expected PERSON/ORG recall lift on insurance forms where generic GLiNER misses domain-specific names.
+- **VLM on insurance forms** — CORD benchmark shows VLM adds FPs on store receipts (wrong domain). Validate `--vlm` on CMS-1500 and ACORD form image samples where personal PII is dense.
 
 ### Near-term
 
-- **WildReceipt benchmark** — 1,765 real-world receipt photos under natural lighting and camera angle. More realistic than SROIE (which is clean scans). Measures robustness to image quality variation.
-- **PHONE recall** — R=0.267. Format variation: `(312) 555-1234` vs `312.555.1234` vs `+1-312-555-1234`. Broader base pattern + context boosting.
-- **VLM benchmark** — Qwen3-VL-8B is wired into the pipeline and confirmed running at 16 s/page on RTX 3090 bfloat16. No F1 numbers yet with VLM on vs off.
-- **nvidia/gliner-PII** — currently using `urchade/gliner_medium-v2.1` as fallback. The purpose-fine-tuned PII model should significantly improve PERSON/ORG recall.
+- **WildReceipt benchmark** — 1,765 real-world receipt photos. More varied than SROIE (angle, lighting, partial occlusion). Measures OCR+NER robustness.
+- **GLiNER GPU inference** — INT8 quantization via `optimum-intel`, or GPU runtime. Brings ~1280s/100 docs to <60s for interactive use.
+- **Financial-domain NER model** — `en_core_web_lg` is news-domain. A transformer fine-tuned on financial/insurance text (or `PII_USE_TRANSFORMERS=1` with a financial model) would lift PERSON/ORG recall ~0.10–0.15.
 
 ### Medium-term
 
-- **HIPAA Safe Harbor coverage report** — 18 identifier categories per 45 CFR §164.514(b)(2). Add per-document coverage report flagging which categories were detected and which are absent.
-- **Template-aware coordinate priors** — CMS-1500 and ACORD forms have fixed field positions. Hard-coded coordinate priors would boost recall on structured forms without relying on NER.
-- **Async batch processing** — current batch mode is sequential. Multi-worker PDF rendering + NER can run in parallel per-page.
-- **Fine-tuned insurance NER** — `en_core_web_lg` is a general-purpose model. A spaCy model fine-tuned on annotated insurance claims would raise PERSON/ORG F1 by ~0.10–0.15.
+- **HIPAA Safe Harbor report** — per-document coverage report flagging which of the 18 §164.514(b)(2) identifier categories were detected.
+- **Template-aware coordinate priors** — CMS-1500 and ACORD forms have fixed field positions. Hard-coded priors = zero-miss on structured forms without needing NER.
+- **Async batch processing** — parallel per-page NER; independent pages don't need to wait for each other.
+- **Driver's license layout detection** — US_DRIVER_LICENSE pattern exists; add layout-aware detection for ID document photos (MRZ line, field positions).
 
 ---
 

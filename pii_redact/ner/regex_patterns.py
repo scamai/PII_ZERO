@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from presidio_analyzer import Pattern, PatternRecognizer
+import re
+from typing import Optional
+
+from presidio_analyzer import Pattern, PatternRecognizer, RecognizerResult
 
 # ---------------------------------------------------------------------------
 # SSN  — XXX-XX-XXXX  or  XXXXXXXXX
@@ -129,9 +132,24 @@ _policy_recognizer = PatternRecognizer(
 )
 
 # ---------------------------------------------------------------------------
-# ABA routing number — 9 digits starting with 0-3 (or 6-7 for certain)
+# ABA routing number — 9 digits with 3-7-1 checksum validation
+# ABA check: sum(digit[i] * [3,7,1,3,7,1,3,7,1][i]) % 10 == 0
+# Without this, 9-digit phone/zip fragments produce P≈0.29; with it P rises sharply.
 # ---------------------------------------------------------------------------
-_routing_recognizer = PatternRecognizer(
+class _AbaRoutingRecognizer(PatternRecognizer):
+    """ABA routing recognizer that gates matches on the 3-7-1 Luhn-like checksum."""
+
+    _WEIGHTS = [3, 7, 1, 3, 7, 1, 3, 7, 1]
+
+    def validate_result(self, pattern_text: str) -> Optional[bool]:
+        digits = re.sub(r"\D", "", pattern_text)
+        if len(digits) != 9:
+            return False
+        total = sum(int(d) * w for d, w in zip(digits, self._WEIGHTS))
+        return total % 10 == 0
+
+
+_routing_recognizer = _AbaRoutingRecognizer(
     supported_entity="US_BANK_NUMBER",
     name="RoutingNumber_Recognizer",
     patterns=[
@@ -315,6 +333,40 @@ _cvv_recognizer = PatternRecognizer(
 )
 
 # ---------------------------------------------------------------------------
+# PHONE_NUMBER — US and international phone numbers
+#
+# Presidio's built-in PhoneRecognizer scores at 0.4 without context keywords,
+# which falls below the 0.6 threshold for bare numbers in financial documents.
+# This recognizer sets base score 0.65 for common US formats (deterministic
+# digit-count + area-code validation) and 0.60 for E.164 international format.
+# ---------------------------------------------------------------------------
+_phone_recognizer = PatternRecognizer(
+    supported_entity="PHONE_NUMBER",
+    name="Phone_Recognizer",
+    patterns=[
+        # US 10-digit: (800) 555-1234 / 800-555-1234 / 800.555.1234
+        # Area code must start 2-9; exchange must start 2-9
+        Pattern(
+            name="phone_us_10digit",
+            # Lookbehind blocks numbers embedded in EDI (+9876543210), SWIFT (:5248632145), IBAN (Q5899676300)
+            regex=r"(?<![+:\w])(?:\+1[\s.\-]?)?(?:\([2-9]\d{2}\)|[2-9]\d{2})[\s.\-]?[2-9]\d{2}[\s.\-]?\d{4}(?!\d)",
+            score=0.65,
+        ),
+        # E.164 international: +44 20 7946 0958 / +33-1-42-86-83-26
+        # Lookbehind blocks EDI field separators (:12+999999, SU+9X:12+123)
+        Pattern(
+            name="phone_international",
+            regex=r"(?<![a-zA-Z0-9])\+[1-9]\d{0,2}[\s.\-]?\(?\d{1,4}\)?[\s.\-]?\d{2,4}[\s.\-]?\d{2,4}(?:[\s.\-]?\d{2,4})?(?!\d|:)\b",
+            score=0.60,
+        ),
+    ],
+    context=[
+        "phone", "mobile", "cell", "tel", "telephone", "fax",
+        "contact", "call", "number", "ph", "ph.", "ext",
+    ],
+)
+
+# ---------------------------------------------------------------------------
 # ADDRESS — US-style street addresses  (e.g. "123 Maple Street")
 # ---------------------------------------------------------------------------
 _address_recognizer = PatternRecognizer(
@@ -339,6 +391,58 @@ _address_recognizer = PatternRecognizer(
 )
 
 # ---------------------------------------------------------------------------
+# ITIN — Individual Taxpayer Identification Number (9xx-xx-xxxx)
+# Built-in UsItinRecognizer scores 0.5, which falls below our min_confidence=0.6.
+# This replacement scores 0.65 and adds context gates to suppress FPs.
+# ---------------------------------------------------------------------------
+_itin_recognizer = PatternRecognizer(
+    supported_entity="US_ITIN",
+    name="ITIN_Recognizer",
+    patterns=[
+        Pattern(
+            name="itin_dashes",
+            regex=r"\b9\d{2}-\d{2}-\d{4}\b",
+            score=0.65,
+        ),
+        Pattern(
+            name="itin_spaces",
+            regex=r"\b9\d{2} \d{2} \d{4}\b",
+            score=0.55,
+        ),
+    ],
+    context=[
+        "itin", "individual taxpayer", "tax id", "taxpayer identification",
+        "taxpayer id", "irs", "w-7", "form w7",
+    ],
+)
+
+# ---------------------------------------------------------------------------
+# US Passport — letter + 8 digits (pre-2021) or 9 alphanumeric (post-2021)
+# Built-in UsPassportRecognizer scores 0.45, below our min_confidence=0.6.
+# This replacement scores 0.65 with context gates to prevent license-plate FPs.
+# ---------------------------------------------------------------------------
+_us_passport_recognizer = PatternRecognizer(
+    supported_entity="US_PASSPORT",
+    name="Passport_Recognizer",
+    patterns=[
+        Pattern(
+            name="us_passport_letter_digits",
+            regex=r"\b[A-Z]\d{8}\b",
+            score=0.65,
+        ),
+        Pattern(
+            name="us_passport_alphanumeric",
+            regex=r"\b[A-Z][A-Z0-9]{8}\b",
+            score=0.45,
+        ),
+    ],
+    context=[
+        "passport", "passport number", "passport no", "passport #",
+        "us passport", "american passport", "travel document",
+    ],
+)
+
+# ---------------------------------------------------------------------------
 # Exported list consumed by presidio_setup.py
 # ---------------------------------------------------------------------------
 PRESIDIO_RECOGNIZER_LIST: list[PatternRecognizer] = [
@@ -355,5 +459,8 @@ PRESIDIO_RECOGNIZER_LIST: list[PatternRecognizer] = [
     _credit_card_recognizer,
     _swift_bic_recognizer,
     _cvv_recognizer,
+    _phone_recognizer,
     _address_recognizer,
+    _itin_recognizer,
+    _us_passport_recognizer,
 ]
